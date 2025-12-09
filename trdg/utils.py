@@ -121,14 +121,15 @@ def make_filename_valid(value: str, allow_unicode: bool = False) -> str:
     """
     value = str(value)
     if allow_unicode:
-        value = unicodedata.normalize("NFKC", value)
+        value = unicodedata.normalize("NFC", value)
+        value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', value)
     else:
         value = (
             unicodedata.normalize("NFKD", value)
             .encode("ascii", "ignore")
             .decode("ascii")
         )
-    value = re.sub(r"[^\w\s-]", "", value)
+        value = re.sub(r"[^\w\s-]", "", value)
 
     # Image names will be shortened to avoid exceeding the max filename length
     return value[:200]
@@ -146,4 +147,11 @@ def get_text_height(image_font: ImageFont, text: str) -> int:
     Get the height of a string when rendered with a given font
     """
     left, top, right, bottom = image_font.getbbox(text)
-    return bottom
+    return bottom - top
+
+
+def get_text_bbox(image_font: ImageFont, text: str) -> Tuple[int, int, int, int]:
+    """
+    Get the bounding box of a string when rendered with a given font
+    """
+    return image_font.getbbox(text)
