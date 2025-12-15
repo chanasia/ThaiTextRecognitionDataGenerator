@@ -1,5 +1,6 @@
 import os
 import random as rnd
+import json
 
 from PIL import Image, ImageFilter, ImageStat
 
@@ -15,45 +16,42 @@ except ImportError as e:
 class FakeTextDataGenerator(object):
     @classmethod
     def generate_from_tuple(cls, t):
-        """
-        Same as generate, but takes all parameters as one tuple
-        """
-
         cls.generate(*t)
 
     @classmethod
     def generate(
-        cls,
-        index: int,
-        text: str,
-        font: str,
-        out_dir: str,
-        size: int,
-        extension: str,
-        skewing_angle: int,
-        random_skew: bool,
-        blur: int,
-        random_blur: bool,
-        background_type: int,
-        distorsion_type: int,
-        distorsion_orientation: int,
-        is_handwritten: bool,
-        name_format: int,
-        width: int,
-        alignment: int,
-        text_color: str,
-        orientation: int,
-        space_width: int,
-        character_spacing: int,
-        margins: int,
-        fit: bool,
-        output_mask: bool,
-        word_split: bool,
-        image_dir: str,
-        stroke_width: int = 0,
-        stroke_fill: str = "#282828",
-        image_mode: str = "RGB",
-        output_bboxes: int = 0,
+            cls,
+            index: int,
+            text: str,
+            font: str,
+            out_dir: str,
+            size: int,
+            extension: str,
+            skewing_angle: int,
+            random_skew: bool,
+            blur: int,
+            random_blur: bool,
+            background_type: int,
+            distorsion_type: int,
+            distorsion_orientation: int,
+            is_handwritten: bool,
+            name_format: int,
+            width: int,
+            alignment: int,
+            text_color: str,
+            orientation: int,
+            space_width: int,
+            character_spacing: int,
+            margins: int,
+            fit: bool,
+            output_mask: bool,
+            word_split: bool,
+            image_dir: str,
+            stroke_width: int = 0,
+            stroke_fill: str = "#282828",
+            image_mode: str = "RGB",
+            output_bboxes: int = 0,
+            output_coco: bool = False,
     ) -> Image:
         image = None
 
@@ -64,12 +62,13 @@ class FakeTextDataGenerator(object):
         ##########################
         # Create picture of text #
         ##########################
+        char_positions = []
         if is_handwritten:
             if orientation == 1:
                 raise ValueError("Vertical handwritten text is unavailable")
             image, mask = handwritten_text_generator.generate(text, text_color)
         else:
-            image, mask = computer_text_generator.generate(
+            image, mask, char_positions = computer_text_generator.generate(
                 text,
                 font,
                 text_color,
@@ -96,7 +95,7 @@ class FakeTextDataGenerator(object):
         # Apply distortion to image #
         #############################
         if distorsion_type == 0:
-            distorted_img = rotated_img  # Mind = blown
+            distorted_img = rotated_img
             distorted_mask = rotated_mask
         elif distorsion_type == 1:
             distorted_img, distorted_mask = distorsion_generator.sin(
@@ -126,10 +125,17 @@ class FakeTextDataGenerator(object):
 
         # Horizontal text
         if orientation == 0:
-            new_width = int(
-                distorted_img.size[0]
-                * (float(size - vertical_margin) / float(distorted_img.size[1]))
-            )
+            if distorted_img.size[1] == 0:
+                print(f"Skipping text '{text}' - zero height image")
+                return
+
+            resize_ratio = (float(size - vertical_margin) / float(distorted_img.size[1]))
+            new_width = int(distorted_img.size[0] * resize_ratio)
+
+            print(f"\n=== DEBUG: Text '{text}' ===")
+            print(f"Original size: {distorted_img.size}")
+            print(f"Resize ratio: {resize_ratio:.4f}")
+            print(f"Resized to: ({new_width}, {size - vertical_margin})")
             resized_img = distorted_img.resize(
                 (new_width, size - vertical_margin), Image.Resampling.LANCZOS
             )
@@ -140,6 +146,9 @@ class FakeTextDataGenerator(object):
             background_height = size
         # Vertical text
         elif orientation == 1:
+            if distorted_img.size[0] == 0:
+                print(f"Skipping text '{text}' - zero width image")
+                return
             new_height = int(
                 float(distorted_img.size[1])
                 * (float(size - horizontal_margin) / float(distorted_img.size[0]))
@@ -190,10 +199,8 @@ class FakeTextDataGenerator(object):
 
             if abs(resized_img_px_mean - background_img_px_mean) < 15:
                 print("value of mean pixel is too similar. Ignore this image")
-
                 print("resized_img_st \n {}".format(resized_img_st.mean))
                 print("background_img_st \n {}".format(background_img_st.mean))
-
                 return
         except Exception as err:
             return
@@ -204,29 +211,36 @@ class FakeTextDataGenerator(object):
 
         new_text_width, _ = resized_img.size
 
+        text_offset_x = margin_left
         if alignment == 0 or width == -1:
             background_img.paste(resized_img, (margin_left, margin_top), resized_img)
             background_mask.paste(resized_mask, (margin_left, margin_top))
+            text_offset_x = margin_left
+            print(f"Text offset: ({text_offset_x}, {margin_top}) - Left aligned")
         elif alignment == 1:
+            text_offset_x = int(background_width / 2 - new_text_width / 2)
             background_img.paste(
                 resized_img,
-                (int(background_width / 2 - new_text_width / 2), margin_top),
+                (text_offset_x, margin_top),
                 resized_img,
             )
             background_mask.paste(
                 resized_mask,
-                (int(background_width / 2 - new_text_width / 2), margin_top),
+                (text_offset_x, margin_top),
             )
+            print(f"Text offset: ({text_offset_x}, {margin_top}) - Center aligned")
         else:
+            text_offset_x = background_width - new_text_width - margin_right
             background_img.paste(
                 resized_img,
-                (background_width - new_text_width - margin_right, margin_top),
+                (text_offset_x, margin_top),
                 resized_img,
             )
             background_mask.paste(
                 resized_mask,
-                (background_width - new_text_width - margin_right, margin_top),
+                (text_offset_x, margin_top),
             )
+            print(f"Text offset: ({text_offset_x}, {margin_top}) - Right aligned")
 
         ############################################
         # Change image mode (RGB, grayscale, etc.) #
@@ -267,7 +281,6 @@ class FakeTextDataGenerator(object):
         box_name = "{}_boxes.txt".format(name)
         tess_box_name = "{}.box".format(name)
 
-        # Save the image
         if out_dir is not None:
             final_image.save(os.path.join(out_dir, image_name))
             if output_mask == 1:
@@ -284,6 +297,65 @@ class FakeTextDataGenerator(object):
                         f.write(
                             " ".join([char] + [str(v) for v in bbox] + ["0"]) + "\n"
                         )
+
+            if output_coco:
+                char_bboxes = mask_to_bboxes(final_mask)
+
+                # Convert numpy int64 to Python int for JSON serialization
+                char_bboxes = [[int(v) for v in bbox] for bbox in char_bboxes]
+
+                # Transform char_positions to match final image
+                if orientation == 0:
+                    resize_ratio = (float(size - vertical_margin) / float(distorted_img.size[1]))
+                else:
+                    resize_ratio = (float(size - horizontal_margin) / float(distorted_img.size[0]))
+
+                def transform_bbox(bbox, ratio, offset_x, offset_y):
+                    """Apply resize and offset to bbox"""
+                    if bbox is None:
+                        return None
+                    return [
+                        int(bbox[0] * ratio) + offset_x,
+                        int(bbox[1] * ratio) + offset_y,
+                        int(bbox[2] * ratio) + offset_x,
+                        int(bbox[3] * ratio) + offset_y
+                    ]
+
+                char_positions_json = []
+                for pos in char_positions:
+                    char_positions_json.append({
+                        "grapheme": pos["grapheme"],
+                        "base_bbox": transform_bbox(pos["base_bbox"], resize_ratio, text_offset_x, margin_top),
+                        "upper_bbox": transform_bbox(pos["upper_bbox"], resize_ratio, text_offset_x, margin_top),
+                        "lower_bbox": transform_bbox(pos["lower_bbox"], resize_ratio, text_offset_x, margin_top),
+                        "trailing_bbox": transform_bbox(pos["trailing_bbox"], resize_ratio, text_offset_x, margin_top),
+                        "is_sara_am": pos["is_sara_am"]
+                    })
+
+                print(f"Transformed char positions: {len(char_positions_json)}")
+                if char_positions_json:
+                    print(f"First grapheme: {char_positions_json[0]['grapheme']}")
+                    if char_positions_json[0]['base_bbox']:
+                        print(f"  Base bbox: {char_positions_json[0]['base_bbox']}")
+                    if char_positions_json[0]['upper_bbox']:
+                        print(f"  Upper bbox: {char_positions_json[0]['upper_bbox']}")
+                    if char_positions_json[0]['trailing_bbox']:
+                        print(f"  Trailing bbox: {char_positions_json[0]['trailing_bbox']}")
+
+                metadata = {
+                    "image_id": index,
+                    "file_name": image_name,
+                    "width": background_width,
+                    "height": background_height,
+                    "text": text,
+                    "char_bboxes": char_bboxes,
+                    "char_positions": char_positions_json,
+                    "text_offset": (text_offset_x, margin_top)
+                }
+
+                metadata_name = "{}_metadata.json".format(name)
+                with open(os.path.join(out_dir, metadata_name), "w", encoding="utf8") as f:
+                    json.dump(metadata, f, ensure_ascii=False, indent=2)
         else:
             if output_mask == 1:
                 return final_image, final_mask
