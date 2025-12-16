@@ -54,8 +54,6 @@ def apply_rotation(img, mask, char_positions, angle):
         return img, mask, char_positions
 
     # 1. Rotate Image & Mask (Expand=True เพื่อไม่ให้ภาพขาด)
-    # PIL rotate เป็น Counter-Clockwise แต่ TRDG ปกติรับค่าเป็น Clockwise (หรือกลับกัน)
-    # เราใช้ angle ตรงๆ ถ้าหมุนผิดทางให้ใส่ -angle
     old_w, old_h = img.size
     old_center = (old_w / 2, old_h / 2)
 
@@ -71,11 +69,9 @@ def apply_rotation(img, mask, char_positions, angle):
     for char_pos in char_positions:
         new_pos = char_pos.copy()
 
-        # หมุน BBox หลัก (Grapheme)
         if 'bbox' in char_pos:
             new_pos['bbox'] = rotate_bbox(char_pos['bbox'], angle, old_center, new_center)
 
-        # หมุน BBox ย่อย (Components: Base, Tone, Vowel...)
         component_keys = [
             'base_bbox', 'leading_bbox', 'upper_vowel_bbox',
             'upper_tone_bbox', 'upper_diacritic_bbox',
@@ -101,10 +97,9 @@ def apply_curve(img, mask, char_positions, amplitude=20):
 
     # สร้างภาพเปล่า
     new_img = Image.new("RGBA", (w, new_h), (0, 0, 0, 0))
-    new_mask = Image.new("L", (w, new_h), 0)
 
-    img_arr = np.array(img)
-    mask_arr = np.array(mask)
+    # [FIXED] เปลี่ยนจาก "L" เป็น "RGB" เพื่อให้เข้ากันได้กับ data_generator.py
+    new_mask = Image.new("RGB", (w, new_h), (0, 0, 0))
 
     # สูตร Sine Wave (0 -> 1 -> 0)
     x_coords = np.arange(w)
@@ -125,12 +120,11 @@ def apply_curve(img, mask, char_positions, amplitude=20):
     for char in char_positions:
         new_c = char.copy()
 
-        # ฟังก์ชันย่อยคำนวณ BBox ใหม่
         def shift_bbox(bbox):
             x1, y1, x2, y2 = bbox
             cx = int((x1 + x2) / 2)
             cx = max(0, min(w - 1, cx))
-            off = y_offsets[cx]  # ใช้ offset ตรงกึ่งกลางกล่อง
+            off = y_offsets[cx]
             return (x1, y1 + off, x2, y2 + off)
 
         if 'bbox' in new_c: new_c['bbox'] = shift_bbox(new_c['bbox'])
