@@ -31,7 +31,7 @@ Here is an explanation of the flags used in the example command:
 | `-bl` | Blur radius. | `0` (No blur) |
 | `-stw` | Stroke width (thickness of outline). | `0` (No outline) |
 
-## COCO Output Format
+### COCO Output Format
 
 When using the `-oc` flag, the generator creates an `dataset/` folder with the following structure:
 
@@ -43,21 +43,7 @@ dataset/
 └── [images generated]
 ```
 
-### Category IDs
-
-The generator outputs annotations using the following 8 category IDs. Note that `trailing` is specifically used for the vowel component of Sara Am.
-
-| ID | Category Name | Description | Examples |
-| :---: | :--- | :--- | :--- |
-| **1** | `word` | The bounding box for the entire word or phrase. | (Full text area) |
-| **2** | `base` | Base characters / Consonants (พยัญชนะ + สระอาปกติ) | ก, ข, มา, ตา |
-| **3** | `leading` | Leading vowels (สระหน้า) | เ, แ, โ, ใ, ไ |
-| **4** | `upper_vowel` | Upper vowels (สระบน) |  ิ,  ี,  ึ,  ื,  ั |
-| **5** | `upper_tone` | Tone marks (วรรณยุกต์) |  ่,  ้,  ๊,  ๋ |
-| **6** | `upper_diacritic` | Other upper symbols (ไม้ไต่คู้, การันต์, นิคหิต) |  ็,  ์,  ํ |
-| **7** | `lower` | Lower vowels (สระล่าง) |  ุ,  ู,  ฺ |
-| **8** | `trailing` | **Sara Aa part of Sara Am** (สระอา ที่มาจาก สระอำ) | า (part of ำ) |
-
+### Sample Images
 
 ![Sample Image](samples/กรุงเทพมหานครเป็นเมืองหลวงของประเทศไทย_8.jpg "Sample Output")
 ![Sample Image](samples/การนอนหลับพักผ่อนให้เพียงพอเป็นสิ่งสำคัญ_10.jpg "Sample Output")
