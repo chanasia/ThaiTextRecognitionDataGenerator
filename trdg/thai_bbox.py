@@ -54,7 +54,7 @@ def _measure_pixels(
     diff_pixels = (comp_padded.astype(int) - base_padded.astype(int))
 
     max_diff = diff_pixels.max() if diff_pixels.size > 0 else 0
-    noise_threshold = max(20, int(max_diff * 0.2))
+    noise_threshold = max(5, int(max_diff * 0.15))
 
     tone_pixels = diff_pixels > noise_threshold
 
@@ -90,8 +90,7 @@ def _measure_pixels(
     y2 = int(y_offset + tone_rows.max() + 1 + comp_top)
 
     if is_tone:
-        padding = max(1, int(font_size * 0.02))  # Dynamic Padding
-
+        padding = max(1, int(font_size * 0.02))
         x1 = x1 - padding
         x2 = x2 + padding
         y2 = y2 + padding
@@ -111,7 +110,6 @@ def _measure_leading(
         return None
 
     full_left, full_top, full_right, full_bottom = image_font.getbbox(grapheme)
-
     full_mask = image_font.getmask(grapheme)
     full_pixels = np.array(full_mask).reshape(full_mask.size[1], full_mask.size[0])
 
@@ -121,8 +119,6 @@ def _measure_leading(
         rows, cols = np.where(full_pixels > 0)
         if len(rows) == 0:
             return None
-
-        # [Fix] Ensure int
         x1 = int(x_offset + cols.min() + full_left)
         y1 = int(y_offset + rows.min() + full_top)
         x2 = int(x_offset + cols.max() + 1 + full_left)
@@ -138,7 +134,6 @@ def _measure_leading(
     if len(rows) == 0:
         return None
 
-    # [Fix] Ensure int
     x1 = int(x_offset + cols.min() + full_left)
     y1 = int(y_offset + rows.min() + full_top)
     x2 = int(x_offset + cols.max() + 1 + full_left)
@@ -156,10 +151,12 @@ def _measure_sara_am(
 ) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[Tuple[int, int, int, int]]]:
     """
     Measure sara am by subtracting Base and masking out known Tone/Vowel bboxes.
+    Includes 'Bottleneck Detection' for when components touch.
     """
     if not full_char:
         return None, None
 
+    # 1. Render Full & Subtraction Logic (เหมือนเดิม - แก้ปัญหาติดพยัญชนะ)
     try:
         full_left, full_top, full_right, full_bottom = image_font.getbbox(full_char)
         full_mask = image_font.getmask(full_char)
@@ -178,7 +175,6 @@ def _measure_sara_am(
         except:
             sub_pixels = None
 
-    # 3. เตรียม Canvas
     if sub_pixels is not None:
         max_h = max(full_pixels.shape[0], sub_pixels.shape[0])
         max_w = max(full_pixels.shape[1], sub_pixels.shape[1])
@@ -203,24 +199,20 @@ def _measure_sara_am(
 
     am_pixels = (full_padded.astype(int) - sub_padded.astype(int)) > 0
 
+    # 2. Masking Logic (เหมือนเดิม - แก้ปัญหาติดวรรณยุกต์)
     if cut_out_bboxes:
         for bbox in cut_out_bboxes:
             if bbox:
                 bx1, by1, bx2, by2 = bbox
-
                 c1 = int(bx1 - x_offset - full_left)
                 r1 = int(by1 - y_offset - full_top)
                 c2 = int(bx2 - x_offset - full_left)
                 r2 = int(by2 - y_offset - full_top)
-
-                # Clip ให้อยู่ในขอบเขตภาพ
                 c1, r1 = max(0, c1), max(0, r1)
                 c2, r2 = min(max_w, c2), min(max_h, r2)
-
                 if r2 > r1 and c2 > c1:
-                    am_pixels[r1:r2, c1:c2] = 0  # ลบวรรณยุกต์ทิ้ง!
+                    am_pixels[r1:r2, c1:c2] = 0
 
-    # 6. หา Gap (ตอนนี้เหลือแค่ Nikhahit กับ Sara Aa แล้ว)
     rows, cols = np.where(am_pixels)
     if len(rows) == 0:
         return None, None
@@ -229,19 +221,31 @@ def _measure_sara_am(
     row_sums = np.sum(am_pixels, axis=1)
 
     gap_row = -1
-    found_upper = False
 
-    for r in range(min_row, max_row):
+    found_content = False
+    for r in range(max_row, min_row - 1, -1):
         if row_sums[r] > 0:
-            found_upper = True
-        if found_upper and row_sums[r] == 0:
-            # ต้องมีเนื้อหาข้างล่างด้วย (สระอา)
-            if np.sum(row_sums[r + 1:]) > 0:
+            found_content = True
+        if found_content and row_sums[r] == 0:
+            # ต้องมั่นใจว่าข้างบนยังมีเนื้อหา (นิคหิต)
+            if np.sum(row_sums[:r]) > 0:
                 gap_row = r
                 break
 
     if gap_row == -1:
-        gap_row = (min_row + max_row) // 2
+        height = max_row - min_row
+        search_start = min_row + int(height * 0.2)
+        search_end = min_row + int(height * 0.6)
+
+        search_start = max(min_row, search_start)
+        search_end = min(max_row, search_end)
+
+        if search_end > search_start:
+            sub_sums = row_sums[search_start:search_end]
+            min_idx = np.argmin(sub_sums)
+            gap_row = search_start + min_idx
+        else:
+            gap_row = (min_row + max_row) // 2
 
     upper_mask = (rows <= gap_row)
     lower_mask = (rows > gap_row)
@@ -268,6 +272,7 @@ def _measure_sara_am(
         )
 
     return upper_bbox, trailing_bbox
+
 
 def measure_grapheme_bboxes(
         image_font: ImageFont,
@@ -297,7 +302,6 @@ def measure_grapheme_bboxes(
     if components['base']:
         base_width = get_text_width(image_font, components['base'])
         left, top, right, bottom = get_text_bbox(image_font, components['base'])
-        # [Fix] Ensure int
         result["base_bbox"] = (
             int(x_offset),
             int(y_offset + top),
@@ -306,6 +310,7 @@ def measure_grapheme_bboxes(
         )
 
     if components['is_sara_am']:
+        # 1. วัดวรรณยุกต์/สระบน
         if components['upper_tone']:
             base_with_nikhahit = (components['base'] or '') + NIKHAHIT
             result["upper_tone_bbox"] = _measure_pixels(
@@ -314,14 +319,12 @@ def measure_grapheme_bboxes(
             )
 
         if components['upper_vowel']:
-            # ปกติสระอำไม่ค่อยมี upper vowel ซ้อน แต่เผื่อไว้
             base_with_nikhahit = (components['base'] or '') + NIKHAHIT
             result["upper_vowel_bbox"] = _measure_pixels(
                 image_font, base_with_nikhahit, components['upper_vowel'],
                 x_offset, y_offset
             )
 
-        #ส่งแค่ Base ไปลบ และส่ง BBox ของ Tone ไป Mask ทิ้ง
         nikhahit_bbox, sara_aa_bbox = _measure_sara_am(
             image_font, g_normalized, x_offset, y_offset,
             base_char_to_subtract=components['base'],
@@ -331,6 +334,7 @@ def measure_grapheme_bboxes(
         result["upper_diacritic_bbox"] = nikhahit_bbox
         result["trailing_bbox"] = sara_aa_bbox
     else:
+        # Standard Logic for non-Sara-Am
         has_vowel = bool(components['upper_vowel'])
         has_tone = bool(components['upper_tone'])
         has_diacritic = bool(components['upper_diacritic'])
