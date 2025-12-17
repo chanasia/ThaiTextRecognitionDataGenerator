@@ -68,6 +68,7 @@ class FakeTextDataGenerator(object):
             output_bboxes: int = 0,
             output_coco: bool = False,
     ) -> Image:
+
         image = None
 
         margin_top, margin_left, margin_bottom, margin_right = margins
@@ -346,6 +347,7 @@ class FakeTextDataGenerator(object):
 
         name = make_filename_valid(name, allow_unicode=True)
         image_name = "{}.{}".format(name, extension)
+        # print(f"Font: {os.path.basename(font)} | Output File: {image_name}")
         mask_name = "{}_mask.png".format(name)
         box_name = "{}_boxes.txt".format(name)
         tess_box_name = "{}.box".format(name)

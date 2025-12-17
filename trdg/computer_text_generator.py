@@ -1,24 +1,16 @@
 """Text image generation with Thai language support."""
 
+import math
 import random as rnd
 from typing import Tuple, List, Dict
-from PIL import Image, ImageColor, ImageDraw, ImageFont
-import math
-import numpy as np
 
-from trdg.utils import get_text_width, get_text_height, get_text_bbox
-from trdg.thai_utils import (
-    decompose_thai_grapheme,
-    normalize_grapheme,
-    split_grapheme_clusters,
-    has_upper_vowel,
-    has_lower_vowel,
-    contains_thai
-)
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 import uharfbuzz as hb
 
 from trdg.vector_engine import FontVectorEngineHB
-from trdg.thai_utils import contains_thai
+from trdg.utils import get_text_bbox, get_text_height
+from trdg.thai_utils import contains_thai, THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_UPPER_VOWELS, has_upper_vowel, \
+    has_lower_vowel, split_grapheme_clusters
 
 _vector_engines = {}
 
@@ -28,135 +20,6 @@ def _get_vector_engine(font_path: str, size: int) -> FontVectorEngineHB:
     if key not in _vector_engines:
         _vector_engines[key] = FontVectorEngineHB(font_path, size)
     return _vector_engines[key]
-
-def _calculate_horizontal_bounds(
-        image_font: ImageFont.FreeTypeFont,
-        graphemes: List[str],
-        word_split: bool,
-        text_parts: List[str],
-        space_width: float,
-        character_spacing: int,
-        is_thai: bool
-) -> Tuple[float, float]:
-    """
-    Simulate text layout to find exact pixel bounds (min_x, max_x).
-    """
-    min_x = float('inf')
-    max_x = float('-inf')
-    cursor_x = 0.0
-
-    iterator = []
-    if word_split and text_parts:
-        for part in text_parts:
-            if part == " ":
-                iterator.append((" ", True))
-            else:
-                sub_graphemes = split_grapheme_clusters(part) if is_thai else list(part)
-                for g in sub_graphemes:
-                    iterator.append((g, False))
-    else:
-        for g in graphemes:
-            iterator.append((g, False))
-
-    for i, (char, is_space) in enumerate(iterator):
-        if is_space:
-            space_w = get_text_width(image_font, " ")
-            advance = int(space_w * space_width)
-            min_x = min(min_x, cursor_x)
-            max_x = max(max_x, cursor_x + advance)
-            cursor_x += advance
-        else:
-            advance = get_text_width(image_font, char)
-            if char.strip():
-                try:
-                    left, _, right, _ = image_font.getbbox(char)
-                    global_left = cursor_x + left
-                    global_right = cursor_x + right
-                    min_x = min(min_x, global_left)
-                    max_x = max(max_x, global_right)
-                except Exception:
-                    min_x = min(min_x, cursor_x)
-                    max_x = max(max_x, cursor_x + advance)
-            else:
-                min_x = min(min_x, cursor_x)
-                max_x = max(max_x, cursor_x)
-
-            cursor_x += advance
-            if not word_split and character_spacing > 0 and i < len(iterator) - 1:
-                cursor_x += character_spacing
-
-    if min_x == float('inf'):
-        return 0, 0
-    return min_x, max_x
-
-def _render_simple_text(
-        txt_img_draw: ImageDraw.ImageDraw,
-        txt_mask_draw: ImageDraw.ImageDraw,
-        image_font: ImageFont.FreeTypeFont,
-        text: str,
-        fill: Tuple[int, int, int],
-        stroke_width: int,
-        stroke_fill_color: Tuple[int, int, int],
-        word_split: bool,
-        space_width: float,
-        character_spacing: int,
-        y_offset: int,
-        start_x: float = 0
-) -> List[Dict]:
-    """Render non-Thai text using simple character-based approach."""
-    if word_split:
-        words = text.split(" ")
-        splitted_text = []
-        for w in words:
-            splitted_text.append(w)
-            splitted_text.append(" ")
-        if splitted_text:
-            splitted_text.pop()
-    else:
-        splitted_text = list(text)
-
-    piece_widths = []
-    for p in splitted_text:
-        if p == " ":
-            piece_widths.append(int(get_text_width(image_font, " ") * space_width))
-        else:
-            piece_widths.append(get_text_width(image_font, p))
-
-    char_positions = []
-    current_x = start_x
-
-    for i, p in enumerate(splitted_text):
-        spacing = character_spacing if not word_split and i > 0 else 0
-        current_x += spacing
-
-        txt_img_draw.text(
-            (current_x, y_offset),
-            p,
-            fill=fill,
-            font=image_font,
-            stroke_width=stroke_width,
-            stroke_fill=stroke_fill_color,
-        )
-        txt_mask_draw.text(
-            (current_x, y_offset),
-            p,
-            fill=((i + 1) // (255 * 255), (i + 1) // 255, (i + 1) % 255),
-            font=image_font,
-            stroke_width=stroke_width,
-            stroke_fill=stroke_fill_color,
-        )
-
-        if p.strip():
-            left, top, right, bottom = get_text_bbox(image_font, p)
-            char_positions.append({
-                "grapheme": p,
-                "bbox": (current_x, y_offset + top, current_x + (right - left), y_offset + bottom)
-            })
-
-        current_x += piece_widths[i]
-
-    return char_positions
-
 
 def _render_thai_mask_components(
         txt_mask_draw: ImageDraw.ImageDraw,
@@ -403,20 +266,116 @@ def _generate_horizontal_text(
         return None, None, []
 
     image_font = ImageFont.truetype(font=font, size=font_size, layout_engine=ImageFont.Layout.RAQM)
+    dumb_font = ImageFont.truetype(font=font, size=font_size, layout_engine=ImageFont.Layout.BASIC)
 
+    # Shape Text
     buf = hb.Buffer()
     buf.add_str(text)
-    buf.guess_segment_properties()
-    hb.shape(engine.hb_font, buf)
+    buf.direction = 'ltr'
+    buf.script = 'thai'
+    buf.language = 'tha'
 
+    features = {
+        "kern": True, "liga": True, "ccmp": True,
+        "locl": True, "mark": True, "mkmk": True
+    }
+
+    hb.shape(engine.hb_font, buf, features)
+
+    # Calculate Layout & Overlap Correction
     min_x, max_x = float('inf'), float('-inf')
     min_y, max_y = float('inf'), float('-inf')
 
     cursor_x, cursor_y = 0, 0
     glyph_layout_data = []
 
+    # Variables for Overlap Correction
+    cluster_highest_y = -float('inf')
+    overlap_padding = font_size * 0.05
+    char_usage_index = 0
+
     for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
-        glyph_name = engine.ttfont.getGlyphName(info.codepoint)
+        original_glyph_name = engine.ttfont.getGlyphName(info.codepoint)
+
+        # Resolve Char (Strict Priority)
+        char_str = engine.get_char_from_glyph_name(original_glyph_name)
+
+        temp_comps = engine.decompose_glyph(original_glyph_name)
+        temp_roles = [c.get('role', 'UNKNOWN') for c in temp_comps]
+
+        is_high = False
+        if temp_comps and temp_comps[0].get('bbox'):
+            if temp_comps[0]['bbox'][1] > font_size * 0.4: is_high = True
+
+        derived_role = 'BASE'
+        if 'TONE' in temp_roles or (is_high and 'NIKHAHIT' not in temp_roles and 'UPPER_VOWEL' not in temp_roles):
+            derived_role = 'TONE'
+        elif 'NIKHAHIT' in temp_roles:
+            derived_role = 'NIKHAHIT'
+        elif 'UPPER_VOWEL' in temp_roles:
+            derived_role = 'UPPER_VOWEL'
+        elif 'SARA_AA' in temp_roles:
+            derived_role = 'SARA_AA'
+
+        # Decision
+        need_recovery = False
+        if not char_str:
+            need_recovery = True
+        elif len(char_str) == 1:
+            if char_str == '\u0E33':
+                need_recovery = False  # Found actual Sara Am glyph
+            elif derived_role in ['TONE', 'NIKHAHIT',
+                                  'UPPER_VOWEL'] and char_str not in THAI_TONE_MARKS and char_str not in THAI_UPPER_DIACRITICS and char_str not in THAI_UPPER_VOWELS:
+                need_recovery = True
+
+        # Recovery Execution
+        if need_recovery:
+            char_str = ""  # Reset
+            if derived_role == 'TONE':
+                for idx in range(char_usage_index, len(text)):
+                    if text[idx] in THAI_TONE_MARKS:
+                        char_str = text[idx]
+
+                        # Handle Tone jumping over Sara Am
+                        if idx == char_usage_index:
+                            char_usage_index += 1
+                        else:
+                            # Check if we skipped Sara Am
+                            skipped_am = False
+                            for k in range(char_usage_index, idx):
+                                if text[k] == '\u0E33': skipped_am = True
+                            if not skipped_am:
+                                char_usage_index = idx + 1
+                        break
+
+            elif derived_role == 'NIKHAHIT':
+                for idx in range(char_usage_index, len(text)):
+                    if text[idx] == '\u0E33' or text[idx] == '\u0E4D':
+                        char_str = '\u0E4D'
+                        # Wait for Aa if it is Am
+                        if text[idx] == '\u0E4D': char_usage_index = idx + 1
+                        break
+            elif derived_role == 'SARA_AA':
+                for idx in range(char_usage_index, len(text)):
+                    if text[idx] == '\u0E32' or text[idx] == '\u0E33':
+                        char_str = '\u0E32'
+                        char_usage_index = idx + 1  # Consume Am/Aa
+                        break
+            else:
+                if info.cluster < len(text):
+                    char_str = text[info.cluster]
+        else:
+            # Normal advance
+            if char_usage_index < len(text):
+                if text[char_usage_index] == char_str:
+                    char_usage_index += 1
+                elif text[char_usage_index] == '\u0E33':
+                    if char_str == '\u0E4D':
+                        pass
+                    elif char_str == '\u0E32':
+                        char_usage_index += 1
+                    elif char_str == '\u0E33':
+                        char_usage_index += 1
 
         # HarfBuzz Units -> Pixels
         x_offset = pos.x_offset / 64
@@ -424,7 +383,7 @@ def _generate_horizontal_text(
         x_advance = pos.x_advance / 64
         y_advance = pos.y_advance / 64
 
-        # Apply spacing adjustment (ถ้าไม่ใช่ตัวสุดท้าย)
+        # Apply spacing adjustment
         if character_spacing > 0:
             x_advance += character_spacing
 
@@ -432,34 +391,99 @@ def _generate_horizontal_text(
         current_draw_x = cursor_x + x_offset
         current_draw_y = cursor_y + y_offset
 
-        # Decompose to find True BBox
-        components = engine.decompose_glyph(glyph_name)
+        # --- EXPLOSION LOGIC ---
+        items_to_process = []
 
-        has_ink = False
-        for comp in components:
-            bbox = comp.get('bbox')
-            if bbox:
-                has_ink = True
-                bx1, by1, bx2, by2 = bbox
+        # Special case: Sara Am glyph (\u0E33) needs forced explosion
+        if char_str == '\u0E33':
+            ni_glyph = engine.get_glyph_name_from_char('\u0E4D')
+            aa_glyph = engine.get_glyph_name_from_char('\u0E32')
+            if ni_glyph: items_to_process.append(('\u0E4D', ni_glyph))
+            if aa_glyph: items_to_process.append(('\u0E32', aa_glyph))
 
-                # Global Coord Calculation (Font Coordinate System: Y-Up)
-                global_x1 = current_draw_x + bx1
-                global_x2 = current_draw_x + bx2
-                global_y1 = current_draw_y + by1
-                global_y2 = current_draw_y + by2
+        elif len(char_str) > 1:
+            # Ligature
+            for c in char_str:
+                std_name = engine.get_glyph_name_from_char(c)
+                items_to_process.append((c, std_name))
+        else:
+            # Standard
+            std_name = engine.get_glyph_name_from_char(char_str) if char_str else original_glyph_name
+            items_to_process.append((char_str, std_name))
 
-                min_x = min(min_x, global_x1)
-                max_x = max(max_x, global_x2)
-                min_y = min(min_y, global_y1)
-                max_y = max(max_y, global_y2)
+        # Process each sub-item independently
+        for sub_char, sub_glyph_name in items_to_process:
+            # Measure this sub-glyph
+            components = engine.decompose_glyph(sub_glyph_name)
 
-        glyph_layout_data.append({
-            "glyph_name": glyph_name,
-            "components": components,
-            "draw_x": current_draw_x,
-            "draw_y": current_draw_y,
-            "x_advance": x_advance
-        })
+            # OVERLAP CORRECTION LOGIC
+            roles = [c.get('role', 'UNKNOWN') for c in components]
+            is_base = 'BASE' in roles or 'LEADING_VOWEL' in roles or 'LOWER_VOWEL' in roles
+            is_upper = 'NIKHAHIT' in roles or 'UPPER_VOWEL' in roles or 'UPPER_DIACRITIC' in roles
+            is_tone = 'TONE' in roles
+
+            if is_base:
+                cluster_highest_y = -float('inf')
+
+            ink_top = -float('inf')
+            ink_bottom = float('inf')
+            has_ink = False
+
+            for c in components:
+                if c.get('bbox'):
+                    has_ink = True
+                    ink_bottom = min(ink_bottom, c['bbox'][1])
+                    ink_top = max(ink_top, c['bbox'][3])
+
+            # Lift Logic
+            item_draw_y = current_draw_y
+
+            if has_ink:
+                current_abs_top = item_draw_y + ink_top
+                current_abs_bottom = item_draw_y + ink_bottom
+
+                # Check & Fix Overlap
+                if is_tone and cluster_highest_y > -float('inf'):
+                    if current_abs_bottom < (cluster_highest_y + overlap_padding):
+                        lift_amount = (cluster_highest_y + overlap_padding) - current_abs_bottom
+                        item_draw_y += lift_amount
+                        current_abs_top += lift_amount
+                        current_abs_bottom += lift_amount
+
+                # Update Highest Y
+                if is_upper or is_tone:
+                    cluster_highest_y = max(cluster_highest_y, current_abs_top)
+
+            # Global Bounds Calculation
+            for comp in components:
+                bbox = comp.get('bbox')
+                if bbox:
+                    bx1, by1, bx2, by2 = bbox
+                    global_x1 = current_draw_x + bx1
+                    global_x2 = current_draw_x + bx2
+                    global_y1 = item_draw_y + by1
+                    global_y2 = item_draw_y + by2
+                    min_x = min(min_x, global_x1)
+                    max_x = max(max_x, global_x2)
+                    min_y = min(min_y, global_y1)
+                    max_y = max(max_y, global_y2)
+
+            # Safety Fallback
+            if not components and x_advance > 0:
+                min_x = min(min_x, current_draw_x)
+                max_x = max(max_x, current_draw_x + x_advance)
+                min_y = min(min_y, current_draw_y)
+                max_y = max(max_y, current_draw_y + font_size * 0.7)
+
+            # Append flattened item to layout data
+            glyph_layout_data.append({
+                "glyph_name": sub_glyph_name,
+                "char_str": sub_char,
+                "components": components,
+                "draw_x": current_draw_x,
+                "draw_y": item_draw_y,
+                "x_advance": x_advance
+            })
 
         cursor_x += x_advance
         cursor_y += y_advance
@@ -501,17 +525,7 @@ def _generate_horizontal_text(
     start_offset_x = -min_x
     font_top_y = max_y
 
-    txt_img_draw.text(
-        (start_offset_x, font_top_y),
-        text,
-        fill=fill,
-        font=image_font,
-        anchor="ls",  # Left-Baseline Alignment
-        stroke_width=stroke_width,
-        stroke_fill=stroke_fill_color,
-        language="th"  # Hint for PIL
-    )
-
+    # Drawing Loop (Character-by-Character)
     char_positions = []
     mask_idx = 0
 
@@ -519,9 +533,23 @@ def _generate_horizontal_text(
         base_draw_x = g_data['draw_x'] + start_offset_x
         base_draw_y = g_data['draw_y']
 
+        # Draw using the recovered character
+        glyph_char = g_data['char_str']
+
+        if glyph_char:
+            txt_img_draw.text(
+                (base_draw_x, font_top_y - base_draw_y),
+                glyph_char,
+                fill=fill,
+                font=dumb_font,  # Use Basic Layout
+                anchor="ls",
+                stroke_width=stroke_width,
+                stroke_fill=stroke_fill_color
+            )
+
+        # Build Output Data
         components = g_data['components']
 
-        # Data Structure
         char_info = {
             "glyph_name": g_data['glyph_name'],
             "bbox": None,
@@ -535,8 +563,6 @@ def _generate_horizontal_text(
         }
 
         all_comp_bboxes = []
-
-        # Color for this character/glyph in the mask
         mask_color = ((mask_idx + 1) // (255 * 255), (mask_idx + 1) // 255, (mask_idx + 1) % 255)
 
         for comp in components:
@@ -546,16 +572,14 @@ def _generate_horizontal_text(
             if bbox:
                 bx1, by1, bx2, by2 = bbox
 
-                # Convert to Image Coordinate System
                 img_x1 = base_draw_x + bx1
                 img_x2 = base_draw_x + bx2
-                img_y1 = font_top_y - (base_draw_y + by2)  # Y-Flip (Top)
-                img_y2 = font_top_y - (base_draw_y + by1)  # Y-Flip (Bottom)
+                img_y1 = font_top_y - (base_draw_y + by2)
+                img_y2 = font_top_y - (base_draw_y + by1)
 
                 final_bbox = (int(img_x1), int(img_y1), int(img_x2), int(img_y2))
                 all_comp_bboxes.append(final_bbox)
 
-                # Assign to Role
                 if role == "BASE":
                     char_info["base_bbox"] = final_bbox
                 elif role == "LEADING_VOWEL":
@@ -578,7 +602,6 @@ def _generate_horizontal_text(
                 txt_mask_draw.rectangle(final_bbox, fill=mask_color)
 
         if all_comp_bboxes:
-            # Calculate total bbox for the glyph
             min_bx = min(b[0] for b in all_comp_bboxes)
             min_by = min(b[1] for b in all_comp_bboxes)
             max_bx = max(b[2] for b in all_comp_bboxes)

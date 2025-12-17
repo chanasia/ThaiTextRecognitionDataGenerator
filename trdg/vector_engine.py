@@ -18,7 +18,6 @@ from trdg.thai_utils import (
     THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_TRAILING_VOWELS
 )
 
-
 class FontVectorEngineHB:
     def __init__(self, font_path: str, size: int):
         self.font_path = font_path
@@ -27,6 +26,13 @@ class FontVectorEngineHB:
         self.glyph_set = self.ttfont.getGlyphSet()
         self.units_per_em = self.ttfont['head'].unitsPerEm
         self.scale = self.size / self.units_per_em
+        self.reverse_cmap = {}
+
+        # Build Reverse CMap for Glyph Name -> Char mapping
+        self.cmap = self.ttfont.getBestCmap()
+        if self.cmap:
+            for codepoint, name in self.cmap.items():
+                self.reverse_cmap[name] = chr(codepoint)
 
         # HarfBuzz Setup
         blob = hb.Blob.from_file_path(font_path)
@@ -34,6 +40,44 @@ class FontVectorEngineHB:
         self.hb_font = hb.Font(face)
         # HarfBuzz uses 26.6 fixed point format
         self.hb_font.scale = (int(self.size * 64), int(self.size * 64))
+
+    def get_char_from_glyph_name(self, glyph_name: str) -> str:
+        """Find the Unicode character(s) for a given glyph name."""
+        # Direct lookup
+        if glyph_name in self.reverse_cmap:
+            return self.reverse_cmap[glyph_name]
+
+        # Ligature Handling (e.g. uni0E4D0E49 -> 0E4D + 0E49)
+        if glyph_name.startswith('uni'):
+            suffix = glyph_name[3:].split('.')[0]  # Remove .small etc
+            # Try to split by 4 digits if length is multiple of 4 (and > 4)
+            if len(suffix) >= 8 and len(suffix) % 4 == 0:
+                try:
+                    chars = ""
+                    for i in range(0, len(suffix), 4):
+                        code = int(suffix[i:i + 4], 16)
+                        chars += chr(code)
+                    return chars
+                except:
+                    pass
+
+        # Strip suffixes
+        base_name = glyph_name.split('.')[0]
+        if base_name in self.reverse_cmap:
+            return self.reverse_cmap[base_name]
+
+        # Standard single uniXXXX
+        if base_name.startswith('uni') and len(base_name) == 7:
+            try:
+                return chr(int(base_name[3:], 16))
+            except:
+                pass
+        return ""
+
+    def get_glyph_name_from_char(self, char: str) -> str:
+        """Find standard glyph name from character."""
+        if not char: return None
+        return self.cmap.get(ord(char))
 
     def _to_pixel_bbox(self, bbox: Tuple[float, float, float, float]) -> Tuple[int, int, int, int]:
         """Convert Design Units to Pixels."""
@@ -51,11 +95,9 @@ class FontVectorEngineHB:
         """Classify glyph role based on its name or Unicode value."""
         n_lower = name.lower()
 
-        # Check Specific Names
         if any(x in n_lower for x in NAME_NIKHAHIT): return "NIKHAHIT"
         if any(x in n_lower for x in NAME_SARA_AA): return "SARA_AA"
 
-        # Try to decode 'uniXXXX'
         unicode_char = None
         if n_lower.startswith("uni") and len(n_lower) >= 7:
             try:
@@ -64,7 +106,6 @@ class FontVectorEngineHB:
             except:
                 pass
 
-        # Classify by Unicode Category
         if unicode_char:
             if unicode_char in THAI_LEADING_VOWELS: return "LEADING_VOWEL"
             if unicode_char in THAI_UPPER_VOWELS: return "UPPER_VOWEL"
@@ -136,39 +177,30 @@ class FontVectorEngineHB:
                 if bbox:
                     role = self.classify_by_name(comp.glyphName)
                     if role == "BASE":
-                        if y_center > self.units_per_em * 0.4:
-                            role = "NIKHAHIT"
-                        else:
-                            role = "SARA_AA"
+                        if y_center > self.units_per_em * 0.4: role = "NIKHAHIT"
+                        else: role = "SARA_AA"
                     results.append({"role": role, "bbox": bbox, "name": comp.glyphName})
         else:
             nikhahit_bboxes, sara_aa_bboxes = self._split_contours_vertical(glyph_name, 0.4)
             if nikhahit_bboxes:
-                results.append({"role": "NIKHAHIT", "bbox": self._to_pixel_bbox(self._merge_bboxes(nikhahit_bboxes)),
-                                "name": glyph_name + "_ni"})
+                results.append({"role": "NIKHAHIT", "bbox": self._to_pixel_bbox(self._merge_bboxes(nikhahit_bboxes)), "name": glyph_name + "_ni"})
             if sara_aa_bboxes:
-                results.append({"role": "SARA_AA", "bbox": self._to_pixel_bbox(self._merge_bboxes(sara_aa_bboxes)),
-                                "name": glyph_name + "_aa"})
+                results.append({"role": "SARA_AA", "bbox": self._to_pixel_bbox(self._merge_bboxes(sara_aa_bboxes)), "name": glyph_name + "_aa"})
         return results
 
     def _handle_ligature_split(self, glyph_name: str, components: List[Dict]) -> List[Dict]:
         """Handle Composite Ligature (e.g. Tone + Nikhahit)."""
         components.sort(key=lambda x: x['y_center_units'])
-        is_stacked_mark = (
-                    len(components) >= 2 and all(c['y_center_units'] > self.units_per_em * 0.3 for c in components))
+        is_stacked_mark = (len(components) >= 2 and all(c['y_center_units'] > self.units_per_em * 0.3 for c in components))
         results = []
         if is_stacked_mark:
-            c_low = components[0];
-            c_low['role'] = 'NIKHAHIT';
-            results.append(c_low)
+            c_low = components[0]; c_low['role'] = 'NIKHAHIT'; results.append(c_low)
             for c_high in components[1:]: c_high['role'] = 'TONE'; results.append(c_high)
         else:
             for c in components:
                 if c['role'] in ['BASE', 'UNKNOWN']:
-                    if c['y_center_units'] > self.units_per_em * 0.5:
-                        c['role'] = 'TONE'
-                    elif c['y_center_units'] < 0:
-                        c['role'] = 'LOWER_VOWEL'
+                    if c['y_center_units'] > self.units_per_em * 0.5: c['role'] = 'TONE'
+                    elif c['y_center_units'] < 0: c['role'] = 'LOWER_VOWEL'
                 results.append(c)
         return results
 
@@ -184,8 +216,7 @@ class FontVectorEngineHB:
 
         results = []
         if len(contours_with_y) >= 2:
-            max_gap = 0;
-            split_idx = 1
+            max_gap = 0; split_idx = 1
             for i in range(len(contours_with_y) - 1):
                 gap = contours_with_y[i + 1][0] - contours_with_y[i][0]
                 if gap > max_gap: max_gap = gap; split_idx = i + 1
@@ -208,7 +239,9 @@ class FontVectorEngineHB:
 
     def decompose_glyph(self, glyph_name: str) -> List[Dict]:
         """Decompose a glyph into vector components with roles and bounding boxes."""
-        if glyph_name not in self.ttfont['glyf']: return []
+
+        if not glyph_name or glyph_name not in self.glyph_set:
+            return []
 
         # Explicit Sara Am check
         if any(x in glyph_name.lower() for x in NAME_SARA_AM):
