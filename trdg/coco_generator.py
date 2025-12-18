@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from typing import List, Tuple, Dict
 from datetime import datetime
 
@@ -8,12 +9,6 @@ def char_boxes_to_word_polygon(char_bboxes: List[Tuple[int, int, int, int]]) -> 
     """
     Convert character-level bounding boxes to word-level polygon.
     Handles Thai upper/lower vowels by creating convex hull around all characters.
-
-    Args:
-        char_bboxes: List of (x1, y1, x2, y2) for each character
-
-    Returns:
-        Polygon coordinates as [x1,y1, x2,y2, x3,y3, x4,y4] (clockwise from top-left)
     """
     if not char_bboxes:
         return []
@@ -68,7 +63,7 @@ def create_coco_annotation(
         area = bbox_width * bbox_height
 
         annotations.append({
-            "id":  current_ann_id,
+            "id": current_ann_id,
             "image_id": metadata["image_id"],
             "category_id": 1,
             "segmentation": [word_polygon],
@@ -80,8 +75,6 @@ def create_coco_annotation(
 
     if "char_positions" in metadata:
         for char_pos in metadata["char_positions"]:
-
-            # สร้าง list ของ keys ที่เราสนใจทั้งหมด
             component_keys = [
                 "base_bbox", "leading_bbox", "upper_vowel_bbox",
                 "upper_tone_bbox", "upper_diacritic_bbox",
@@ -91,7 +84,6 @@ def create_coco_annotation(
             for key in component_keys:
                 if char_pos.get(key):
                     bbox = char_pos[key]
-                    # สร้าง Polygon สี่เหลี่ยมจาก bbox (TextFuseNet ต้องการ segmentation)
                     char_polygon = [
                         bbox[0], bbox[1],
                         bbox[2], bbox[1],
@@ -142,10 +134,10 @@ def save_coco_json(
         "categories": categories
     }
 
-    os.makedirs(os.path. dirname(output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     with open(output_path, "w", encoding="utf8") as f:
-        json. dump(coco_format, f, ensure_ascii=False, indent=2)
+        json.dump(coco_format, f, ensure_ascii=False, indent=2)
 
     print(f"Saved COCO annotations to {output_path}")
     print(f"  Images: {len(images)}")
@@ -158,91 +150,94 @@ def convert_metadata_to_coco(
         train_ratio: float = 0.8
 ):
     """
-    Convert all metadata files to COCO format and split train/val.
-
-    Args:
-        metadata_dir: Directory containing *_metadata.json files
-        output_dir: Directory to save train. json and val.json
-        train_ratio: Ratio of training data (default: 0.8)
+    Convert all metadata files to COCO format by scanning buckets (sub-folders).
+    Uses os.scandir for memory efficiency on large datasets.
     """
-    import glob
-    import random
 
-    # Find all metadata files
-    metadata_files = glob.glob(os.path.join(metadata_dir, "*_metadata.json"))
+    # --- Step 1: Collect all metadata file paths using streaming scan ---
+    # We need a list of paths to perform a random shuffle for train/val split.
+    print(f"Scanning {metadata_dir} for metadata files...")
+    all_metadata_paths = []
 
-    if not metadata_files:
+    # Iterate through bucket folders (0000, 0001, ...)
+    with os.scandir(metadata_dir) as buckets:
+        for bucket in buckets:
+            if bucket.is_dir():
+                with os.scandir(bucket.path) as files:
+                    for f in files:
+                        if f.is_file() and f.name.endswith("_metadata.json"):
+                            all_metadata_paths.append(f.path)
+
+    if not all_metadata_paths:
         print(f"No metadata files found in {metadata_dir}")
         return
 
     # Shuffle for random split
-    random.shuffle(metadata_files)
+    random.shuffle(all_metadata_paths)
 
     # Split train/val
-    split_idx = int(len(metadata_files) * train_ratio)
-    train_files = metadata_files[: split_idx]
-    val_files = metadata_files[split_idx:]
+    split_idx = int(len(all_metadata_paths) * train_ratio)
+    train_files = all_metadata_paths[:split_idx]
+    val_files = all_metadata_paths[split_idx:]
 
-    print(f"Total files: {len(metadata_files)}")
-    print(f"Train:  {len(train_files)}, Val: {len(val_files)}")
+    print(f"Total files found: {len(all_metadata_paths)}")
+    print(f"Splitting: Train={len(train_files)}, Val={len(val_files)}")
 
-    # Process train set
-    train_images = []
-    train_annotations = []
-    annotation_id = 1
+    # --- Step 2: Process datasets ---
+    def process_file_list(file_list, start_ann_id):
+        images = []
+        annotations = []
+        current_ann_id = start_ann_id
 
-    for meta_file in train_files:
-        try:
-            with open(meta_file, "r", encoding="utf8") as f:
-                metadata = json.load(f)
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"Skipping corrupted file: {meta_file} - {e}")
-            continue
+        for meta_file in file_list:
+            try:
+                with open(meta_file, "r", encoding="utf8") as f:
+                    metadata = json.load(f)
 
-        image_info, annotations = create_coco_annotation(metadata, annotation_id)
+                # Update relative path for file_name if images are in subfolders
+                # This ensures the COCO json points correctly to 'base/000x/img.jpg'
+                rel_path = os.path.relpath(meta_file, metadata_dir)
+                folder_name = os.path.dirname(rel_path)
+                metadata["file_name"] = os.path.join("base", folder_name, metadata["file_name"])
 
-        if annotations:
-            train_images.append(image_info)
-            train_annotations.extend(annotations)
-            annotation_id += len(annotations)
+                image_info, anns = create_coco_annotation(metadata, current_ann_id)
 
-    # Process val set
-    val_images = []
-    val_annotations = []
+                if anns:
+                    images.append(image_info)
+                    annotations.extend(anns)
+                    current_ann_id += len(anns)
+            except Exception as e:
+                print(f"Error processing {meta_file}: {e}")
+                continue
 
-    for meta_file in val_files:
-        try:
-            with open(meta_file, "r", encoding="utf8") as f:
-                metadata = json. load(f)
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"Skipping corrupted file: {meta_file} - {e}")
-            continue
+        return images, annotations, current_ann_id
 
-        image_info, annotations = create_coco_annotation(metadata, annotation_id)
+    # Process Train Set
+    print("Processing Train set...")
+    train_images, train_anns, next_id = process_file_list(train_files, 1)
 
-        if annotations:
-            val_images.append(image_info)
-            val_annotations.extend(annotations)
-            annotation_id += len(annotations)
+    # Process Val Set
+    print("Processing Val set...")
+    val_images, val_anns, _ = process_file_list(val_files, next_id)
 
-    # Save COCO JSONs
+    # --- Step 3: Save results ---
     save_coco_json(
-        os.path. join(output_dir, "annotations", "train.json"),
+        os.path.join(output_dir, "annotations", "train.json"),
         train_images,
-        train_annotations
+        train_anns
     )
 
     save_coco_json(
         os.path.join(output_dir, "annotations", "val.json"),
         val_images,
-        val_annotations
+        val_anns
     )
 
 
 if __name__ == "__main__":
     # Example usage
     convert_metadata_to_coco(
-        metadata_dir="out/",
-        output_dir="dataset/",
+        metadata_dir="dataset/thai_text/base",
+        output_dir="dataset/thai_text/coco-output",
         train_ratio=0.8
     )

@@ -2,6 +2,7 @@ import argparse
 import errno
 import os
 import sys
+import math
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -9,7 +10,6 @@ import random as rnd
 import string
 import sys
 from multiprocessing import Pool
-
 from tqdm import tqdm
 
 from trdg.data_generator import FakeTextDataGenerator
@@ -358,8 +358,13 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
+    # Define base and coco output paths
+    base_dir = os.path.join(args.output_dir, "base")
+    coco_dir = os.path.join(args.output_dir, "coco-output")
+
     try:
-        os.makedirs(args.output_dir)
+        os.makedirs(base_dir, exist_ok=True)
+        os.makedirs(coco_dir, exist_ok=True)
     except OSError as e:
         if e.errno != errno.EEXIST:
             raise
@@ -393,131 +398,123 @@ def main():
     else:
         fonts = load_fonts(args.language)
 
-    strings = []
+    # --- RAM Optimization: Input Streaming ---
+    # We count lines first to support tqdm without loading everything to RAM
+    string_count = 0
+    if args.input_file != "":
+        with open(args.input_file, 'r', encoding='utf-8') as f:
+            for _ in f: string_count += 1
+        if args.count:
+            string_count = min(string_count, args.count)
 
-    if args.use_wikipedia:
-        strings = create_strings_from_wikipedia(args.length, args.count if args.count else 100, args.language)
-    elif args.input_file != "":
-        strings = create_strings_from_file(args.input_file, args.count if args.count else sys.maxsize)
-    elif args.random_sequences:
-        strings = create_strings_randomly(
-            args.length,
-            args.random,
-            args.count if args.count else 100,
-            args.include_letters,
-            args.include_numbers,
-            args.include_symbols,
-            args.language,
-        )
-        if args.include_symbols or True not in (
-                args.include_letters,
-                args.include_numbers,
-                args.include_symbols,
-        ):
-            args.name_format = 2
-    else:
-        if args.count is None:
-            strings = lang_dict
+    # Generator to read file line-by-line (Streaming)
+    def get_string_generator():
+        if args.input_file != "":
+            with open(args.input_file, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if args.count and i >= args.count:
+                        break
+                    yield line.strip()
         else:
-            strings = create_strings_from_dict(
-                args.length, args.random, args.count, lang_dict
+            # Fallback for dict/random if not using input_file
+            # Note: For 600K this part might still need optimization if used
+            for s in lang_dict[:args.count if args.count else len(lang_dict)]:
+                yield s
+
+    def data_generator():
+        # Bucket size: 5000 images per subfolder
+        bucket_size = 5000
+
+        for i, text_line in enumerate(get_string_generator()):
+            # Logic for sub-directories (Buckets)
+            bucket_num = i // bucket_size
+            bucket_path = os.path.join(base_dir, f"{bucket_num:04d}")
+            os.makedirs(bucket_path, exist_ok=True)
+
+            # Checkpoint: Skip if file already exists
+            file_name = f"{i}.{args.extension}"
+            target_file = os.path.join(bucket_path, file_name)
+            if os.path.exists(target_file):
+                continue
+
+            # Process Arabic if needed
+            if args.language == "ar":
+                from arabic_reshaper import ArabicReshaper
+                from bidi.algorithm import get_display
+                arabic_reshaper = ArabicReshaper()
+                text_line = " ".join([get_display(arabic_reshaper.reshape(w)) for w in text_line.split(" ")[::-1]])
+
+            # Case conversion
+            if args.case == "upper":
+                text_line = text_line.upper()
+            elif args.case == "lower":
+                text_line = text_line.lower()
+
+            yield (
+                i,
+                text_line,
+                fonts[rnd.randrange(0, len(fonts))],
+                bucket_path,  # Save directly to the bucket
+                args.format,
+                args.extension,
+                args.skew_angle,
+                args.random_skew,
+                args.blur,
+                args.random_blur,
+                args.background,
+                args.distorsion,
+                args.distorsion_orientation,
+                args.handwritten,
+                args.name_format,
+                args.width,
+                args.alignment,
+                args.text_color,
+                args.orientation,
+                args.space_width,
+                args.character_spacing,
+                args.margins,
+                args.fit,
+                args.output_mask,
+                args.word_split,
+                args.image_dir,
+                args.stroke_width,
+                args.stroke_fill,
+                args.image_mode,
+                args.output_bboxes,
+                args.output_coco,
             )
 
-    if args.count is None:
-        args.count = len(strings)
-    else:
-        strings = strings[:args.count]
-
-    if args.language == "ar":
-        from arabic_reshaper import ArabicReshaper
-        from bidi.algorithm import get_display
-
-        arabic_reshaper = ArabicReshaper()
-        strings = [
-            " ".join(
-                [get_display(arabic_reshaper.reshape(w)) for w in s.split(" ")[::-1]]
-            )
-            for s in strings
-        ]
-    if args.case == "upper":
-        strings = [x.upper() for x in strings]
-    if args.case == "lower":
-        strings = [x.lower() for x in strings]
-
-    print(f"Generating {len(strings)} unique images")
-
-    string_count = len(strings)
+    print(f"Generating {string_count} images into {base_dir}")
 
     p = Pool(args.thread_count)
     for _ in tqdm(
             p.imap_unordered(
                 FakeTextDataGenerator.generate_from_tuple,
-                zip(
-                    [i for i in range(0, string_count)],
-                    strings,
-                    [fonts[rnd.randrange(0, len(fonts))] for _ in range(0, string_count)],
-                    [args.output_dir] * string_count,
-                    [args.format] * string_count,
-                    [args.extension] * string_count,
-                    [args.skew_angle] * string_count,
-                    [args.random_skew] * string_count,
-                    [args.blur] * string_count,
-                    [args.random_blur] * string_count,
-                    [args.background] * string_count,
-                    [args.distorsion] * string_count,
-                    [args.distorsion_orientation] * string_count,
-                    [args.handwritten] * string_count,
-                    [args.name_format] * string_count,
-                    [args.width] * string_count,
-                    [args.alignment] * string_count,
-                    [args.text_color] * string_count,
-                    [args.orientation] * string_count,
-                    [args.space_width] * string_count,
-                    [args.character_spacing] * string_count,
-                    [args.margins] * string_count,
-                    [args.fit] * string_count,
-                    [args.output_mask] * string_count,
-                    [args.word_split] * string_count,
-                    [args.image_dir] * string_count,
-                    [args.stroke_width] * string_count,
-                    [args.stroke_fill] * string_count,
-                    [args.image_mode] * string_count,
-                    [args.output_bboxes] * string_count,
-                    [args.output_coco] * string_count,
-                ),
+                data_generator(),
             ),
-            total=args.count,
+            total=string_count,
     ):
         pass
     p.terminate()
 
-    if args.name_format == 2:
-        with open(
-                os.path.join(args.output_dir, "labels.txt"), "w", encoding="utf8"
-        ) as f:
-            for i in range(string_count):
-                file_name = str(i) + "." + args.extension
-                label = strings[i]
-                if args.space_width == 0:
-                    label = label.replace(" ", "")
-                f.write("{} {}\n".format(file_name, label))
-
+    # Phase 2: COCO Conversion
     if args.output_coco:
         print("\n" + "=" * 50)
-        print("Converting to COCO format...")
+        print("Phase 2: Converting to COCO format (Streaming)...")
         print("=" * 50)
 
         from trdg.coco_generator import convert_metadata_to_coco
 
+        # Important: convert_metadata_to_coco needs to be modified to scan buckets
         convert_metadata_to_coco(
-            metadata_dir=args.output_dir,
-            output_dir=args.output_dir,
+            metadata_dir=base_dir,
+            output_dir=coco_dir,
             train_ratio=args.train_ratio
         )
 
         print("\n" + "=" * 50)
         print("COCO dataset ready!")
-        print(f"Location: {args.output_dir}")
+        print(f"Images & Annotations at: {coco_dir}")
         print("=" * 50)
 
 
