@@ -7,7 +7,6 @@ from PIL import Image, ImageFilter, ImageStat
 
 from trdg import computer_text_generator, background_generator, distorsion_generator
 from trdg.utils import mask_to_bboxes, make_filename_valid
-# [สำคัญ] เรียกใช้ฟังก์ชันดัดโค้งจากไฟล์ transform_utils.py
 from trdg.transform_utils import apply_rotation, apply_curve
 
 try:
@@ -16,7 +15,6 @@ except ImportError as e:
     print("Missing modules for handwritten text generation.")
 
 
-# [สำคัญ] Class แก้ Bug JSON int64
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -108,7 +106,6 @@ class FakeTextDataGenerator(object):
             else:
                 angle = skewing_angle
 
-            # ใช้ apply_rotation ของเราเพื่อหมุน BBox ตาม
             image, mask, char_positions = apply_rotation(image, mask, char_positions, angle)
 
         rotated_img = image
@@ -123,27 +120,25 @@ class FakeTextDataGenerator(object):
         if distorsion_type == 0:
             pass
         elif distorsion_type == 1:
-            distorted_img, distorted_mask = distorsion_generator.sin(
+            # Updated to pass and receive char_positions for bbox tracking
+            distorted_img, distorted_mask, char_positions = distorsion_generator.sin(
                 rotated_img,
                 rotated_mask,
+                char_positions,
                 vertical=(distorsion_orientation == 0 or distorsion_orientation == 2),
                 horizontal=(distorsion_orientation == 1 or distorsion_orientation == 2),
             )
         elif distorsion_type == 2:
-            distorted_img, distorted_mask = distorsion_generator.cos(
+            # Updated to pass and receive char_positions for bbox tracking
+            distorted_img, distorted_mask, char_positions = distorsion_generator.cos(
                 rotated_img,
                 rotated_mask,
+                char_positions,
                 vertical=(distorsion_orientation == 0 or distorsion_orientation == 2),
                 horizontal=(distorsion_orientation == 1 or distorsion_orientation == 2),
             )
         elif distorsion_type == 3:
-            # [ส่วนที่เพิ่มใหม่] Logic ทำโค้ง (Curve)
-            # เพื่อให้เห็นผลชัดๆ ตอนทดสอบ ผมแนะนำให้ลบเงื่อนไขสุ่มออกก่อนก็ได้ครับ
-            # หรือถ้าจะใช้สุ่ม ก็แก้บรรทัดข้างล่างเป็น if rnd.random() > 0.5:
-
-            # ตรงนี้ผมใส่ให้มันทำโค้งทุกครั้งเลยนะ (เพื่อทดสอบ)
             curve_amt = distorsion_orientation if distorsion_orientation > 0 else 20
-            # สุ่มความสูงของโค้งระหว่าง 5 ถึงค่าที่ตั้งไว้
             random_curve = rnd.randint(5, curve_amt)
 
             distorted_img, distorted_mask, char_positions = apply_curve(
@@ -151,9 +146,11 @@ class FakeTextDataGenerator(object):
             )
 
         else:
-            distorted_img, distorted_mask = distorsion_generator.random(
+            # Updated to pass and receive char_positions for bbox tracking
+            distorted_img, distorted_mask, char_positions = distorsion_generator.random(
                 rotated_img,
                 rotated_mask,
+                char_positions,
                 vertical=(distorsion_orientation == 0 or distorsion_orientation == 2),
                 horizontal=(distorsion_orientation == 1 or distorsion_orientation == 2),
             )
@@ -162,7 +159,6 @@ class FakeTextDataGenerator(object):
         # Resize image to desired format #
         ##################################
 
-        # Helper เพื่อ Resize BBox
         def scale_bbox(bbox, ratio):
             return [int(b * ratio) for b in bbox]
 
@@ -347,7 +343,6 @@ class FakeTextDataGenerator(object):
 
         name = make_filename_valid(name, allow_unicode=True)
         image_name = "{}.{}".format(name, extension)
-        # print(f"Font: {os.path.basename(font)} | Output File: {image_name}")
         mask_name = "{}_mask.png".format(name)
         box_name = "{}_boxes.txt".format(name)
         tess_box_name = "{}.box".format(name)
@@ -370,7 +365,6 @@ class FakeTextDataGenerator(object):
                         )
 
             if output_coco:
-                # Extract bboxes for easy access
                 char_bboxes = []
                 for pos in char_positions:
                     for k in ['base_bbox', 'leading_bbox', 'upper_vowel_bbox', 'upper_tone_bbox',
@@ -391,7 +385,6 @@ class FakeTextDataGenerator(object):
 
                 metadata_name = "{}_metadata.json".format(name)
                 with open(os.path.join(out_dir, metadata_name), "w", encoding="utf8") as f:
-                    # ใช้ NumpyEncoder
                     json.dump(metadata, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
         else:
             if output_mask == 1:
