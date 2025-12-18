@@ -2,6 +2,8 @@
 
 import math
 import random as rnd
+import os
+import warnings
 from typing import Tuple, List, Dict
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
@@ -20,6 +22,79 @@ def _get_vector_engine(font_path: str, size: int) -> FontVectorEngineHB:
     if key not in _vector_engines:
         _vector_engines[key] = FontVectorEngineHB(font_path, size)
     return _vector_engines[key]
+
+def _check_latin_support(font_path: str) -> bool:
+    """Check if font supports Latin characters (A-Z, a-z)."""
+    try:
+        from fontTools.ttLib import TTFont
+        ttfont = TTFont(font_path)
+        cmap = ttfont.getBestCmap()
+        if not cmap:
+            return False
+
+        # Check A-Z (U+0041 to U+005A)
+        for code in range(0x0041, 0x005B):
+            if code not in cmap:
+                return False
+
+        # Check a-z (U+0061 to U+007A)
+        for code in range(0x0061, 0x007B):
+            if code not in cmap:
+                return False
+
+        return True
+    except:
+        return False
+
+def _get_random_latin_font(latin_font_dir: str = "fonts/latin") -> str:
+    """Get random Latin font from directory."""
+    try:
+        if not os.path.exists(latin_font_dir):
+            return None
+
+        fonts = [f for f in os.listdir(latin_font_dir) if f.endswith(('.ttf', '.otf'))]
+        if not fonts:
+            return None
+
+        return os.path.join(latin_font_dir, rnd.choice(fonts))
+    except:
+        return None
+
+def _split_text_by_script(text: str) -> List[Tuple[str, str]]:
+    """Split text into segments by script (Thai/Latin).
+
+    Returns: List of (segment, script_type) where script_type is 'thai' or 'latin'
+    """
+    if not text:
+        return []
+
+    segments = []
+    current_segment = ""
+    current_type = None
+
+    for char in text:
+        # Detect script type
+        if '\u0E00' <= char <= '\u0E7F':  # Thai Unicode range
+            char_type = 'thai'
+        elif ('A' <= char <= 'Z') or ('a' <= char <= 'z'):
+            char_type = 'latin'
+        else:
+            # Numbers, symbols, spaces follow previous type or default to thai
+            char_type = current_type if current_type else 'thai'
+
+        # Group consecutive same-type characters
+        if char_type == current_type:
+            current_segment += char
+        else:
+            if current_segment:
+                segments.append((current_segment, current_type))
+            current_segment = char
+            current_type = char_type
+
+    if current_segment:
+        segments.append((current_segment, current_type))
+
+    return segments
 
 def _render_thai_mask_components(
         txt_mask_draw: ImageDraw.ImageDraw,
@@ -259,6 +334,97 @@ def _generate_horizontal_text(
     Generate horizontal text image using Vector Engine for exact layout.
     """
 
+    # Check Latin support
+    has_latin_support = _check_latin_support(font)
+    has_latin_text = any(('A' <= c <= 'Z') or ('a' <= c <= 'z') for c in text)
+
+    if has_latin_text and not has_latin_support:
+        warnings.warn(f"Font '{font}' does not support Latin characters. Using fallback Latin font.")
+        latin_font = _get_random_latin_font()
+        if not latin_font:
+            warnings.warn("No Latin fallback font found in fonts/latin directory.")
+    else:
+        latin_font = None
+
+    # If no fallback needed, use original logic
+    if not latin_font:
+        return _generate_horizontal_text_original(
+            text, font, text_color, font_size, space_width,
+            character_spacing, fit, word_split, stroke_width, stroke_fill
+        )
+
+    # Mixed rendering with fallback
+    segments = _split_text_by_script(text)
+
+    # Render each segment separately then combine
+    segment_images = []
+    segment_masks = []
+    all_char_positions = []
+    cumulative_width = 0
+
+    for segment_text, script_type in segments:
+        segment_font = latin_font if script_type == 'latin' else font
+
+        seg_img, seg_mask, seg_positions = _generate_horizontal_text_original(
+            segment_text, segment_font, text_color, font_size, space_width,
+            character_spacing, fit, word_split, stroke_width, stroke_fill
+        )
+
+        if seg_img:
+            segment_images.append(seg_img)
+            segment_masks.append(seg_mask)
+
+            # Adjust positions with cumulative offset
+            for pos in seg_positions:
+                if pos.get('bbox'):
+                    x1, y1, x2, y2 = pos['bbox']
+                    pos['bbox'] = (x1 + cumulative_width, y1, x2 + cumulative_width, y2)
+                for key in ['base_bbox', 'leading_bbox', 'upper_vowel_bbox',
+                           'upper_tone_bbox', 'upper_diacritic_bbox', 'lower_bbox', 'trailing_bbox']:
+                    if pos.get(key):
+                        x1, y1, x2, y2 = pos[key]
+                        pos[key] = (x1 + cumulative_width, y1, x2 + cumulative_width, y2)
+                all_char_positions.append(pos)
+
+            cumulative_width += seg_img.width
+
+    if not segment_images:
+        return None, None, []
+
+    # Combine segments
+    max_height = max(img.height for img in segment_images)
+    total_width = sum(img.width for img in segment_images)
+
+    combined_img = Image.new("RGBA", (total_width, max_height), (0, 0, 0, 0))
+    combined_mask = Image.new("RGB", (total_width, max_height), (0, 0, 0))
+
+    x_offset = 0
+    for img, mask in zip(segment_images, segment_masks):
+        combined_img.paste(img, (x_offset, 0), img)
+        combined_mask.paste(mask, (x_offset, 0))
+        x_offset += img.width
+
+    if fit:
+        bbox = combined_img.getbbox()
+        if bbox:
+            return combined_img.crop(bbox), combined_mask.crop(bbox), all_char_positions
+
+    return combined_img, combined_mask, all_char_positions
+
+def _generate_horizontal_text_original(
+        text: str,
+        font: str,
+        text_color: str,
+        font_size: int,
+        space_width: int,
+        character_spacing: int,
+        fit: bool,
+        word_split: bool,
+        stroke_width: int = 0,
+        stroke_fill: str = "#282828",
+) -> Tuple:
+    """Original horizontal text generation logic."""
+
     try:
         engine = _get_vector_engine(font, font_size)
     except Exception as e:
@@ -272,8 +438,20 @@ def _generate_horizontal_text(
     buf = hb.Buffer()
     buf.add_str(text)
     buf.direction = 'ltr'
-    buf.script = 'thai'
-    buf.language = 'tha'
+
+    # Detect script to prevent Latin chars being treated as Thai diacritics
+    has_thai = any('\u0E00' <= c <= '\u0E7F' for c in text)
+    has_latin = any(('A' <= c <= 'Z') or ('a' <= c <= 'z') for c in text)
+
+    if has_thai and not has_latin:
+        buf.script = 'thai'
+        buf.language = 'tha'
+    elif has_latin and not has_thai:
+        buf.script = 'latn'
+        buf.language = 'en'
+    else:
+        buf.script = 'zyyy'  # Common script for mixed content
+        buf.language = 'en'
 
     features = {
         "kern": True, "liga": True, "ccmp": True,
