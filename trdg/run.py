@@ -2,24 +2,21 @@ import argparse
 import errno
 import os
 import sys
-import math
+import random as rnd
+from multiprocessing import Pool
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-import random as rnd
-import string
-import sys
-from multiprocessing import Pool
+import numpy as np
 from tqdm import tqdm
 
+from trdg.augment import PRESETS as AUGMENT_PRESETS
+from trdg.corpus import normalize as normalize_text
 from trdg.data_generator import FakeTextDataGenerator
-from trdg.string_generator import (
-    create_strings_from_dict,
-    create_strings_from_file,
-    create_strings_from_wikipedia,
-    create_strings_randomly,
-)
-from trdg.utils import load_dict, load_fonts
+from trdg.utils import load_dict, load_fonts, make_filename_valid
+
+FONT_EXTS = (".ttf", ".otf")
+BUCKET_SIZE = 5000  # images per sub-folder
 
 
 def margins(margin):
@@ -49,8 +46,8 @@ def parse_arguments():
         "--language",
         type=str,
         nargs="?",
-        help="The language to use, should be fr (French), en (English), es (Spanish), de (German), ar (Arabic), cn (Chinese), ja (Japanese) or hi (Hindi)",
-        default="en",
+        help="Font set / dictionary to use: th (default, fonts/th), en, fr, es, de, ar, cn, ja, hi, ko",
+        default="th",
     )
     parser.add_argument(
         "-c",
@@ -182,8 +179,8 @@ def parse_arguments():
         "-na",
         "--name_format",
         type=int,
-        help="Define how the produced files will be named. 0: [TEXT]_[ID].[EXT], 1: [ID]_[TEXT].[EXT] 2: [ID].[EXT] + one file labels.txt containing id-to-label mappings",
-        default=0,
+        help="Define how the produced files will be named. 0: [TEXT]_[ID].[EXT], 1: [ID]_[TEXT].[EXT] 2: [ID].[EXT] (recommended: short paths, labels come from labels.txt)",
+        default=2,
     )
     parser.add_argument(
         "-om",
@@ -349,25 +346,90 @@ def parse_arguments():
         "--train_ratio",
         type=float,
         nargs="?",
-        help="Train/val split ratio when using --output_coco (default: 0.8)",
-        default=0.8,
+        help="Train/val split ratio for train.txt/val.txt and --output_coco (default: 0.95)",
+        default=0.95,
+    )
+    parser.add_argument(
+        "-aug",
+        "--augment",
+        type=str,
+        choices=sorted(AUGMENT_PRESETS),
+        default="off",
+        help="Document-style augmentation preset applied to the final image: off, doc (forms/scans/screenshots), heavy",
+    )
+    parser.add_argument(
+        "-ap",
+        "--augment_prob",
+        type=float,
+        default=1.0,
+        help="Multiplier on every augmentation probability (0.5 = half as often)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for font choice and per-worker randomness (reproducible runs)",
+    )
+    parser.add_argument(
+        "--no_labels",
+        action="store_true",
+        help="Do not write labels.txt / train.txt / val.txt / charset.txt",
+        default=False,
     )
     return parser.parse_args()
 
 
+def _init_worker(seed):
+    """Give every worker its own random stream (forked workers would otherwise share one)."""
+    s = (seed if seed is not None else int.from_bytes(os.urandom(4), "little")) ^ os.getpid()
+    rnd.seed(s)
+    np.random.seed(s % (2 ** 32))
+
+
+def _expected_name(index, text, name_format, space_width):
+    """Mirror of the naming logic in data_generator so resumed runs can find existing files."""
+    if space_width == 0:
+        text = text.replace(" ", "")
+    if name_format == 1:
+        name = "{}_{}".format(index, text)
+    elif name_format == 2:
+        name = str(index)
+    else:
+        name = "{}_{}".format(text, index)
+    return make_filename_valid(name, allow_unicode=True)
+
+
+def write_labels(output_dir, rows, train_ratio, seed=None):
+    """rows: list of (relative image path, text). Writes labels/train/val/charset next to base/."""
+    rows = sorted(rows)
+    with open(os.path.join(output_dir, "labels.txt"), "w", encoding="utf8", newline="\n") as f:
+        for path, text in rows:
+            f.write(f"{path}\t{text}\n")
+    shuffled = list(rows)
+    rnd.Random(seed).shuffle(shuffled)
+    split = int(len(shuffled) * train_ratio)
+    for name, part in (("train.txt", shuffled[:split]), ("val.txt", shuffled[split:])):
+        with open(os.path.join(output_dir, name), "w", encoding="utf8", newline="\n") as f:
+            for path, text in part:
+                f.write(f"{path}\t{text}\n")
+    chars = set()
+    for _, text in rows:
+        chars.update(text)
+    chars.discard(" ")  # PaddleOCR: space is enabled by use_space_char, not the dict
+    with open(os.path.join(output_dir, "charset.txt"), "w", encoding="utf8", newline="\n") as f:
+        f.write("\n".join(sorted(chars)) + "\n")
+    print(f"labels: {len(rows)} rows -> labels.txt, train.txt ({split}), val.txt ({len(rows) - split}), charset.txt ({len(chars)} chars)")
+
+
 def main():
     args = parse_arguments()
+    rnd.seed(args.seed)
 
-    # Define base and coco output paths
     base_dir = os.path.join(args.output_dir, "base")
     coco_dir = os.path.join(args.output_dir, "coco-output")
-
-    try:
-        os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
+    if args.output_coco:
         os.makedirs(coco_dir, exist_ok=True)
-    except OSError as e:
-        if e.errno != errno.EEXIST:
-            raise
 
     if args.dict:
         lang_dict = []
@@ -387,9 +449,11 @@ def main():
     if args.font_dir:
         fonts = [
             os.path.join(args.font_dir, p)
-            for p in os.listdir(args.font_dir)
-            if os.path.splitext(p)[1] == ".ttf"
+            for p in sorted(os.listdir(args.font_dir))
+            if os.path.splitext(p)[1].lower() in FONT_EXTS
         ]
+        if not fonts:
+            sys.exit(f"No .ttf/.otf fonts in {args.font_dir}")
     elif args.font:
         if os.path.isfile(args.font):
             fonts = [args.font]
@@ -398,43 +462,43 @@ def main():
     else:
         fonts = load_fonts(args.language)
 
-    # --- RAM Optimization: Input Streaming ---
-    # We count lines first to support tqdm without loading everything to RAM
-    string_count = 0
+    # --- Input streaming: count lines first so tqdm has a total without loading the file to RAM
     if args.input_file != "":
-        with open(args.input_file, 'r', encoding='utf-8') as f:
-            for _ in f: string_count += 1
-        if args.count:
-            string_count = min(string_count, args.count)
+        string_count = 0
+        with open(args.input_file, "r", encoding="utf-8") as f:
+            for _ in f:
+                string_count += 1
+    else:
+        string_count = len(lang_dict)
+    if args.count:
+        string_count = min(string_count, args.count)
 
-    # Generator to read file line-by-line (Streaming)
     def get_string_generator():
         if args.input_file != "":
-            with open(args.input_file, 'r', encoding='utf-8') as f:
+            with open(args.input_file, "r", encoding="utf-8") as f:
                 for i, line in enumerate(f):
                     if args.count and i >= args.count:
                         break
-                    yield line.strip()
+                    yield line.rstrip("\r\n")
         else:
-            # Fallback for dict/random if not using input_file
-            # Note: For 600K this part might still need optimization if used
-            for s in lang_dict[:args.count if args.count else len(lang_dict)]:
+            for s in lang_dict[: args.count if args.count else len(lang_dict)]:
                 yield s
 
-    def data_generator():
-        # Bucket size: 5000 images per subfolder
-        bucket_size = 5000
+    texts = {}          # index -> label (filled while streaming, read when results come back)
+    resumed = []        # (relative path, text) of files that already existed
 
+    def data_generator():
         for i, text_line in enumerate(get_string_generator()):
-            # Logic for sub-directories (Buckets)
-            bucket_num = i // bucket_size
-            bucket_path = os.path.join(base_dir, f"{bucket_num:04d}")
+            text_line = normalize_text(text_line)
+            if not text_line:
+                continue
+            bucket_path = os.path.join(base_dir, f"{i // BUCKET_SIZE:04d}")
             os.makedirs(bucket_path, exist_ok=True)
 
-            # Checkpoint: Skip if file already exists
-            file_name = f"{i}.{args.extension}"
-            target_file = os.path.join(bucket_path, file_name)
-            if os.path.exists(target_file):
+            # Checkpoint: skip if file already exists (resume)
+            expected = f"{_expected_name(i, text_line, args.name_format, args.space_width)}.{args.extension}"
+            if os.path.exists(os.path.join(bucket_path, expected)):
+                resumed.append((os.path.relpath(os.path.join(bucket_path, expected), args.output_dir), text_line))
                 continue
 
             # Process Arabic if needed
@@ -450,11 +514,12 @@ def main():
             elif args.case == "lower":
                 text_line = text_line.lower()
 
+            texts[i] = text_line
             yield (
                 i,
                 text_line,
                 fonts[rnd.randrange(0, len(fonts))],
-                bucket_path,  # Save directly to the bucket
+                bucket_path,
                 args.format,
                 args.extension,
                 args.skew_angle,
@@ -482,20 +547,34 @@ def main():
                 args.image_mode,
                 args.output_bboxes,
                 args.output_coco,
+                args.augment,
+                args.augment_prob,
             )
 
-    print(f"Generating {string_count} images into {base_dir}")
+    print(f"Generating {string_count} images into {base_dir} (fonts: {len(fonts)}, augment: {args.augment})")
 
-    p = Pool(args.thread_count)
-    for _ in tqdm(
-            p.imap_unordered(
-                FakeTextDataGenerator.generate_from_tuple,
-                data_generator(),
-            ),
+    rows = []
+    skipped = 0
+    with Pool(args.thread_count, initializer=_init_worker, initargs=(args.seed,)) as p:
+        for result in tqdm(
+            p.imap_unordered(FakeTextDataGenerator.generate_from_tuple, data_generator(), chunksize=8),
             total=string_count,
-    ):
-        pass
-    p.terminate()
+        ):
+            if result is None:
+                skipped += 1
+                continue
+            index, image_name = result
+            rel = os.path.join("base", f"{index // BUCKET_SIZE:04d}", image_name)
+            rows.append((rel.replace(os.sep, "/"), texts.pop(index)))
+
+    rows += [(p_.replace(os.sep, "/"), t) for p_, t in resumed]
+    if skipped:
+        print(f"Skipped {skipped} samples (unrenderable text or unusable contrast)")
+    if resumed:
+        print(f"Resumed: {len(resumed)} images already existed")
+
+    if not args.no_labels and rows:
+        write_labels(args.output_dir, rows, args.train_ratio, args.seed)
 
     # Phase 2: COCO Conversion
     if args.output_coco:
@@ -505,7 +584,6 @@ def main():
 
         from trdg.coco_generator import convert_metadata_to_coco
 
-        # Important: convert_metadata_to_coco needs to be modified to scan buckets
         convert_metadata_to_coco(
             metadata_dir=base_dir,
             output_dir=coco_dir,

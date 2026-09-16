@@ -12,8 +12,8 @@ with open(path.join(here, "README.md"), encoding="utf-8") as f:
 
 setup(
     name="trdg",
-    version="1.8.0",
-    description="TextRecognitionDataGenerator: A synthetic data generator for text recognition",
+    version="2.0.0",
+    description="ThaiTextRecognitionDataGenerator: synthetic Thai/English line images for OCR training",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Belval/TextRecognitionDataGenerator",
@@ -39,18 +39,22 @@ setup(
     packages=find_packages(exclude=["contrib", "docs", "tests"]),
     include_package_data=True,
     install_requires=[
-        "pillow>=7.0.0",
-        "requests>=2.20.0",
-        "opencv-python>=4.2.0.32",
-        "tqdm>=4.23.0",
-        "wikipedia>=1.4.0",
-        "diffimg==0.2.3",
-        "arabic-reshaper==2.1.3",
-        "python-bidi==0.4.2",
+        "uharfbuzz>=0.39",
+        "fonttools>=4.40",
+        "pillow>=10.0",
+        "numpy>=1.24",
+        "opencv-python>=4.8",
+        "tqdm>=4.60",
+        "requests>=2.28",
     ],
+    extras_require={
+        "wiki": ["wikipedia>=1.4.0", "pyarrow"],
+        "arabic": ["arabic-reshaper", "python-bidi"],
+    },
     entry_points={
         "console_scripts": [
-            "trdg=trdg.run:main"
+            "trdg=trdg.run:main",
+            "trdg-corpus=trdg.corpus:main",
         ],
     },
 )

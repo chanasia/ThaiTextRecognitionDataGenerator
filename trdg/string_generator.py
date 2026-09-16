@@ -2,8 +2,6 @@ import random as rnd
 import string
 from typing import List
 
-import wikipedia
-
 
 def create_strings_from_file(filename: str, count: int) -> List[str]:
     """
@@ -44,6 +42,8 @@ def create_strings_from_dict(
 
 
 def get_random_page_content() -> str:
+    import wikipedia  # optional dependency, only needed for -wk
+
     page_title = wikipedia.random(1)
     try:
         page_content = wikipedia.page(page_title).summary
@@ -58,6 +58,8 @@ def create_strings_from_wikipedia(
     """
     Create all string by randomly picking Wikipedia articles and taking sentences from them.
     """
+    import wikipedia  # optional dependency, only needed for -wk
+
     wikipedia.set_lang(lang)
     sentences = []
 

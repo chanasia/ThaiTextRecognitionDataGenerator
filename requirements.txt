@@ -1,10 +1,13 @@
-uharfbuzz
-fonttools
-Pillow
-requests
-opencv-python
-tqdm
-diffimg
-arabic-reshaper
-python-bidi
-wikipedia
+uharfbuzz>=0.39
+fonttools>=4.40
+Pillow>=10.0
+numpy>=1.24
+opencv-python>=4.8
+tqdm>=4.60
+requests>=2.28
+
+# optional:
+#   wikipedia                      -wk (Wikipedia as text source)
+#   pyarrow                        tools/fetch_thai_wiki.py
+#   arabic-reshaper python-bidi    -l ar
+#   pytest                         python -m pytest tests/

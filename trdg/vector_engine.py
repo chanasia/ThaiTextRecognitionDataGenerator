@@ -15,7 +15,7 @@ from typing import Tuple, Dict, Optional, List
 from trdg.thai_utils import (
     NAME_NIKHAHIT, NAME_SARA_AA, NAME_SARA_AM, NAME_TONES,
     THAI_LEADING_VOWELS, THAI_UPPER_VOWELS, THAI_LOWER_CHARS,
-    THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_TRAILING_VOWELS
+    THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_TRAILING_VOWELS, THAI_PUA_MAP
 )
 
 class FontVectorEngineHB:
@@ -66,6 +66,12 @@ class FontVectorEngineHB:
         if base_name in self.reverse_cmap:
             return self.reverse_cmap[base_name]
 
+        # Ligature named by its parts (f_i, uni0E0D_uni0E38): concatenate the parts' characters
+        if '_' in base_name:
+            parts = [self.get_char_from_glyph_name(p) for p in base_name.split('_')]
+            if all(parts):
+                return "".join(parts)
+
         # Standard single uniXXXX
         if base_name.startswith('uni') and len(base_name) == 7:
             try:
@@ -105,6 +111,10 @@ class FontVectorEngineHB:
                 unicode_char = chr(int(hex_str, 16))
             except:
                 pass
+        if unicode_char is None:
+            unicode_char = self.reverse_cmap.get(name) or self.reverse_cmap.get(name.split('.')[0])
+        if unicode_char in THAI_PUA_MAP:  # legacy positional variant -> standard character
+            unicode_char = THAI_PUA_MAP[unicode_char]
 
         if unicode_char:
             if unicode_char in THAI_LEADING_VOWELS: return "LEADING_VOWEL"
@@ -152,26 +162,33 @@ class FontVectorEngineHB:
 
     def _get_component_bbox(self, comp) -> Tuple[Optional[Tuple[float, float, float, float]], float]:
         """Get bbox and Y-center of a composite component."""
-        if hasattr(comp, 'transform'):
-            matrix = comp.transform
-        else:
-            matrix = [1, 0, 0, 1, comp.x, comp.y]
-
-        t = Transform(matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5])
-        pen = BoundsPen(self.glyph_set)
         try:
+            # fontTools: comp.transform is a 2x2 matrix [[xx, xy], [yx, yy]] (only present when
+            # the component is scaled/rotated); the offset always lives in comp.x / comp.y
+            (xx, xy), (yx, yy) = comp.transform if hasattr(comp, 'transform') else ((1, 0), (0, 1))
+            t = Transform(xx, xy, yx, yy, getattr(comp, 'x', 0), getattr(comp, 'y', 0))
+            pen = BoundsPen(self.glyph_set)
             self.glyph_set[comp.glyphName].draw(TransformPen(pen, t))
             if pen.bounds:
                 return self._to_pixel_bbox(pen.bounds), (pen.bounds[1] + pen.bounds[3]) / 2
-        except:
+        except Exception:
             pass
         return None, 0
 
+    def _glyf(self, glyph_name: str):
+        """TrueType glyph record, or None for CFF/OpenType fonts (no 'glyf' table)."""
+        if 'glyf' not in self.ttfont:
+            return None
+        try:
+            return self.ttfont['glyf'][glyph_name]
+        except KeyError:
+            return None
+
     def _handle_sara_am_split(self, glyph_name: str) -> List[Dict]:
         """Handle Explicit Sara Am (uni0E33) decomposition."""
-        glyph = self.ttfont['glyf'][glyph_name]
+        glyph = self._glyf(glyph_name)
         results = []
-        if glyph.isComposite():
+        if glyph is not None and glyph.isComposite():
             for comp in glyph.components:
                 bbox, y_center = self._get_component_bbox(comp)
                 if bbox:
@@ -247,10 +264,10 @@ class FontVectorEngineHB:
         if any(x in glyph_name.lower() for x in NAME_SARA_AM):
             return self._handle_sara_am_split(glyph_name)
 
-        glyph = self.ttfont['glyf'][glyph_name]
+        glyph = self._glyf(glyph_name)
 
         # Composite Glyph
-        if glyph.isComposite():
+        if glyph is not None and glyph.isComposite():
             raw_comps = []
             for comp in glyph.components:
                 bbox, y_center = self._get_component_bbox(comp)

@@ -6,13 +6,14 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageStat
 
 from trdg import computer_text_generator, background_generator, distorsion_generator
+from trdg.augment import augment as _augment
 from trdg.utils import mask_to_bboxes, make_filename_valid
 from trdg.transform_utils import apply_rotation, apply_curve
 
 try:
     from trdg import handwritten_text_generator
-except ImportError as e:
-    print("Missing modules for handwritten text generation.")
+except ImportError:
+    handwritten_text_generator = None  # only needed for -hw (needs tensorflow)
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -29,7 +30,18 @@ class NumpyEncoder(json.JSONEncoder):
 class FakeTextDataGenerator(object):
     @classmethod
     def generate_from_tuple(cls, t):
-        cls.generate(*t)
+        """Pool entry point. Returns (index, image_name) when a file was written, else None.
+
+        One broken font/sample must not take down a 200k-image run: log it and skip.
+        """
+        try:
+            return cls.generate(*t)
+        except Exception:
+            import sys
+            import traceback
+            print(f"[skip] index={t[0]} font={os.path.basename(str(t[2]))} text={t[1]!r}", file=sys.stderr)
+            traceback.print_exc()
+            return None
 
     @classmethod
     def generate(
@@ -65,6 +77,8 @@ class FakeTextDataGenerator(object):
             image_mode: str = "RGB",
             output_bboxes: int = 0,
             output_coco: bool = False,
+            augment_preset: str = "off",
+            augment_prob: float = 1.0,
     ) -> Image:
 
         image = None
@@ -80,6 +94,8 @@ class FakeTextDataGenerator(object):
         if is_handwritten:
             if orientation == 1:
                 raise ValueError("Vertical handwritten text is unavailable")
+            if handwritten_text_generator is None:
+                raise ImportError("-hw needs the handwritten model dependencies (see requirements-hw.txt)")
             image, mask = handwritten_text_generator.generate(text, text_color)
         else:
             image, mask, char_positions = computer_text_generator.generate(
@@ -95,6 +111,9 @@ class FakeTextDataGenerator(object):
                 stroke_width,
                 stroke_fill,
             )
+            if image is None:
+                # font cannot render this text and no fallback font covers it: skip, never emit tofu
+                return None
 
         ###################################
         # Apply Rotation (Skew) & Update BBox
@@ -327,6 +346,19 @@ class FakeTextDataGenerator(object):
         final_image = background_img.filter(gaussian_filter)
         final_mask = background_mask.filter(gaussian_filter)
 
+        ###########################################
+        # Document-style augmentation (see augment.py)
+        # Geometric ops would invalidate masks / bboxes, so they are only
+        # enabled when no positional output is requested.
+        ###########################################
+        if augment_preset and augment_preset != "off":
+            final_image = _augment(
+                final_image,
+                preset=augment_preset,
+                prob_scale=augment_prob,
+                geometric=not (output_coco or output_bboxes or output_mask),
+            )
+
         #####################################
         # Generate name for resulting image #
         #####################################
@@ -386,6 +418,7 @@ class FakeTextDataGenerator(object):
                 metadata_name = "{}_metadata.json".format(name)
                 with open(os.path.join(out_dir, metadata_name), "w", encoding="utf8") as f:
                     json.dump(metadata, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+            return index, image_name
         else:
             if output_mask == 1:
                 return final_image, final_mask

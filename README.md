@@ -1,55 +1,176 @@
-# ThaiTextRecognitionDataGenerator [![CircleCI](https://circleci.com/gh/Belval/TextRecognitionDataGenerator/tree/master.svg?style=svg)](https://circleci.com/gh/Belval/TextRecognitionDataGenerator/tree/master) [![PyPI version](https://badge.fury.io/py/trdg.svg)](https://badge.fury.io/py/trdg) [![codecov](https://codecov.io/gh/Belval/TextRecognitionDataGenerator/branch/master/graph/badge.svg)](https://codecov.io/gh/Belval/TextRecognitionDataGenerator) [![Documentation Status](https://readthedocs.org/projects/textrecognitiondatagenerator/badge/?version=latest)](https://textrecognitiondatagenerator.readthedocs.io/en/latest/?badge=latest)
+# ThaiTextRecognitionDataGenerator
 
-A synthetic Thai data generator for text recognition
+Synthetic Thai / English line images for training an OCR **text recognizer** (CTC / SVTR /
+PaddleOCR-style), with an optional COCO character-box mode for detectors.
 
-## What is it for?
+Fork of [Belval/TextRecognitionDataGenerator](https://github.com/Belval/TextRecognitionDataGenerator)
+with Thai shaping done properly through HarfBuzz (tone marks and vowels land where a real
+font puts them), 312 bundled Thai fonts, a mixed-content corpus builder and document-style
+augmentation that reproduces the failure modes of real scans and forms.
 
-Generating Thai text image samples to train an OCR software. Now supporting thai text! and export COCO format (BBOX CHARACTER LEVEL) For a more thorough tutorial see [the official documentation](https://textrecognitiondatagenerator.readthedocs.io/en/latest/index.html).
+| | |
+|---|---|
+| ![](samples/กรุงเทพมหานครเป็นเมืองหลวงของประเทศไทย_8.jpg) | ![](samples/ช่วย%20Check%20บิลโต๊ะห้าให้หน่อยครับลูกค้าจะกลับแล้ว_18.jpg) |
 
-## What do I need to make it work?
+## Setup
+
+Python 3.10+. `uharfbuzz` / `opencv-python` ship x86-64 wheels only, so on **Windows on ARM**
+create the venv from an x86-64 interpreter (runs under the built-in emulation):
+
 ```bash
-pip install pillow nltk natsort six fire uharfbuzz fonttools opencv-python tqdm diffimg arabic-reshaper python-bidi wikipedia
+# any x86-64 machine (Windows / Linux / macOS-Intel, Docker)
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# Windows on ARM
+uv venv --python cpython-3.12-windows-x86_64-none .venv
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
 
-### Basic (CLI)
+Docker: `docker build -t trdg . && docker run --rm -v $PWD/out:/app/out trdg trdg/run.py --help`
+
+## 1. Build a corpus
+
+Single dictionary words do not train a recognizer that has to read forms, invoices, chat
+screenshots or books. `trdg.corpus` composes realistic lines: Thai runs (words joined the
+way Thai is written, with occasional phrase spaces), English tokens, prices, dates in
+Thai/Arabic numerals, phone and ID numbers, e-mails, addresses, form `label : value`
+pairs, dotted leaders, list markers and common document phrases.
+
 ```bash
-python run.py -dt dicts/th_en_words.txt -oc -ft "fonts/th/THSarabun.ttf" -b 1 -k 0 -rk -d 0 -do 0 -bl 0 -stw 0 -f 64 -e png
+python -m trdg.corpus --count 200000 --out out/corpus.txt --charset_out out/charset.txt
 ```
+
+Add natural text for better character statistics (Thai Wikipedia, your own documents,
+one paragraph per line). `--natural_weight` controls the share (default 45%):
+
 ```bash
-python run.py -dt dicts/th_en_words.txt -oc -ft "fonts/th/THSarabun.ttf" -b 1 -k 0 -rk -d 0 -do 0 -bl 0 -stw 0 -d 3 -do 10 -f 64 -e png
+pip install pyarrow
+python tools/fetch_thai_wiki.py                   # ~87 MB shard -> out/thai_wiki.txt
+python -m trdg.corpus --count 500000 --text out/thai_wiki.txt my_docs.txt --out out/corpus.txt
 ```
 
-### COCO Output Format
+Every line is NFC-normalised (`ํ`+`า` → `ำ`, zero-width chars removed), restricted to a
+charset (default: Thai block + ASCII + a few symbols, or `--charset file`), kept within
+`--min_len/--max_len` and cut only where a Thai grapheme cluster is not split.
+Use `trdg.corpus.normalize` on OCR output before scoring, otherwise CER lies.
 
-When using the `-oc` flag, the generator creates an `dataset/` folder with the following structure:
+## 2. Render
 
-```text
-dataset/thai_text/
-├── base/                       # Storage for all generated raw data
-│   ├── 0000/                   # First bucket (Images 0-4,999)
-│   │   ├── 0.jpg               # Generated image
-│   │   ├── 0_metadata.json     # Individual character-level metadata
-│   │   └── ...
-│   ├── 0001/                   # Second bucket (Images 5,000-9,999)
-│   └── ...                     # Additional buckets every 5,000 images
-└── coco-output/                # Final aggregated COCO dataset
-    └── annotations/            # Combined annotation files
-        ├── train.json          # COCO format for training set
-        └── val.json            # COCO format for validation set
+```bash
+python trdg/run.py -i out/corpus.txt -f 64 -e png -t 8 -aug doc --output_dir out
 ```
 
-### Example
+| flag | meaning |
+|---|---|
+| `-i` | corpus file, one line per image (streamed, any size) |
+| `-f 64` | image height in px. Generate at ≥ 48; tone marks survive the trainer's resize better than when rendered at 32 |
+| `-aug doc` | augmentation preset, see below (`off`, `doc`, `heavy`), `-ap 0.5` scales all probabilities |
+| `-t 8` | worker processes |
+| `-fd trdg/fonts/th_doc` | restrict fonts to the 45 document/UI fonts (default: all 312 in `fonts/th`) |
+| `-k 3 -rk` | random skew ±3° |
+| `-bl 1 -rbl` | random gaussian blur 0–1 px |
+| `-b 0/1/2/3` | background: gaussian-noise paper, white, quasicrystal, image from `-id dir` |
+| `-tc "#000000,#505050"` | text colour range |
+| `--seed 1` | reproducible fonts and augmentation |
+| `-c N` | stop after N lines (resume: existing files are skipped and kept in the labels) |
 
-![Sample Image](samples/กรุงเทพมหานครเป็นเมืองหลวงของประเทศไทย_8.jpg "Sample Output")
+Output:
 
-![Sample Image](samples/การนอนหลับพักผ่อนให้เพียงพอเป็นสิ่งสำคัญ_10.jpg "Sample Output")
+```
+out/
+├── base/0000/0.png …      5 000 images per bucket
+├── labels.txt             base/0000/0.png<TAB>ประชุมทีม Backend วันศุกร์ 10:30
+├── train.txt / val.txt    split by --train_ratio (default 0.95)
+└── charset.txt            one character per line (space excluded)
+```
 
-![Sample Image](samples/ช่วย%20Check%20บิลโต๊ะห้าให้หน่อยครับลูกค้าจะกลับแล้ว_18.jpg "Sample Output")
+Only images that were actually written are listed; lines a font cannot render (and no
+bundled font covers) are skipped rather than drawn as tofu.
 
-### Bounding Box Visualization
+### Augmentation presets (`trdg/augment.py`)
 
-![Visual Image](samples/visual2.png "Visual Image")
+Built from what breaks real Thai OCR: dotted form lines running through สระอุ/อู, thin
+strokes dropping tone marks after downscaling, JPEG chat screenshots, faxed binarised prints.
 
-### Dictionary
+| op | what it simulates | doc | heavy |
+|---|---|---|---|
+| underline | dotted / dashed / solid form line at or under the baseline | .35 | .50 |
+| border | table-cell rules at the edges | .15 | .25 |
+| morph | thicker (ink spread) or thinner (light print) strokes | .30 | .45 |
+| lowres | downscale 35–75 % and back | .35 | .50 |
+| motion | small motion blur | .05 | .15 |
+| noise | gaussian / salt-and-pepper | .30 | .45 |
+| contrast | brightness, contrast, gamma | .40 | .55 |
+| jpeg | quality 20–75 | .40 | .50 |
+| threshold | Otsu / adaptive binarisation | .05 | .10 |
+| invert | light text on dark | .02 | .05 |
+| shear, aspect | italic-ish shear, condensed/stretched width (geometric) | .10 / .15 | .30 |
 
-The text is loaded from a dictionary file (that can be found in the *dicts* folder). By default, all lines from the dictionary are used. If the `-c` parameter is specified, the text is chosen at random from the dictionary. The text is drawn on a white background made with Gaussian noise (configurable). The resulting image is saved as [text]_[index].jpg
+Geometric ops change pixel positions, so they are disabled automatically when masks,
+bounding boxes or COCO output are requested.
+
+![](samples/augment_heavy_sheet.png)
+
+### Thai rendering notes
+
+* Shaping is done by HarfBuzz; each glyph is then drawn at the shaped position, so
+  stacked vowel + tone mark, left-shifted marks after ป ฝ ฟ and lowered marks are placed
+  like the font intends.
+* Legacy fonts without GPOS (TH Sarabun, TH SarabunNew, the UPC family, Angsana/Cordia
+  style fonts) select positional variants from the Private Use Area (U+F700–U+F71A).
+  These are mapped back to the standard character for bookkeeping while the variant
+  glyph is drawn, otherwise `ฝั่ง` came out as `ฝ่ฝ` and `ป์` lost its mark:
+
+  ![](samples/legacy_pua_before_after.png)
+* Text a font cannot cover is rendered with another bundled font that can, per segment;
+  if none can, the sample is skipped.
+
+## 3. Shrink for shipping
+
+`labels.txt` is already PaddleOCR's `SimpleDataSet` format, so the output folder can be handed
+to a trainer as-is. PNG lines on noisy paper barely compress (~53 KB each, 200k = 10.8 GB);
+grayscale JPEG at height 48 is 11.5 KB (2.3 GB) and most trainers resize to 48 anyway:
+
+```bash
+python tools/to_jpg.py out/rec out/jpg/rec --gray --height 48 -q 90 -t 8
+tar -a -cf out/rec_200k_jpg.zip -C out/jpg rec     # Windows tar.exe / bsdtar
+```
+
+## COCO / character boxes (detector training)
+
+The original character-level bounding-box pipeline is unchanged:
+
+```bash
+python trdg/run.py -i out/corpus.txt -oc -f 64 -e png --output_dir dataset/thai_text
+```
+
+writes `<id>_metadata.json` per image plus `coco-output/annotations/{train,val}.json`
+with word polygons (category 1) and per-component character boxes (category 2: base,
+leading/upper/lower/trailing vowel, tone, diacritic). Non-geometric augmentation may be
+combined with it (`-aug doc`); shear/aspect are skipped automatically.
+
+## Tests
+
+```bash
+python tests/test_rec_pipeline.py        # or: python -m pytest tests/
+```
+
+## Layout
+
+```
+trdg/corpus.py          corpus builder (python -m trdg.corpus)
+trdg/augment.py         document-style augmentation
+trdg/run.py             CLI: corpus -> images + labels
+trdg/computer_text_generator.py   HarfBuzz shaping, per-glyph drawing, font fallback
+trdg/vector_engine.py   glyph decomposition -> per-component boxes (COCO mode)
+trdg/fonts/th           312 Thai fonts, trdg/fonts/th_doc 45 document/UI fonts
+trdg/dicts/th.txt       81k Thai words, en.txt 466k English words
+tools/fetch_thai_wiki.py  Thai Wikipedia -> plain text for --text
+```
+
+## Credits
+
+[Belval/TextRecognitionDataGenerator](https://github.com/Belval/TextRecognitionDataGenerator) (MIT),
+HarfBuzz via [uharfbuzz](https://github.com/harfbuzz/uharfbuzz), fonts under their own
+licences (Google Fonts Thai collection, UPC fonts).

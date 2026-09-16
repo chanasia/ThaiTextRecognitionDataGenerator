@@ -18,6 +18,20 @@ SARA_AM = '\u0E33'
 NIKHAHIT = '\u0E4D'
 SARA_AA = '\u0E32'
 
+# Legacy Windows Thai fonts (UPC family, Angsana/Cordia/Browallia ...) have no GPOS; they
+# substitute positional variants living in the Private Use Area. Map them back to the
+# standard character so role detection works, while still drawing the variant glyph.
+THAI_PUA_MAP = {
+    '\uF700': '\u0E10',  # \u0E10 descender-less
+    '\uF701': '\u0E34', '\uF702': '\u0E35', '\uF703': '\u0E36', '\uF704': '\u0E37',   # upper vowels, left-shifted
+    '\uF705': '\u0E48', '\uF706': '\u0E49', '\uF707': '\u0E4A', '\uF708': '\u0E4B', '\uF709': '\u0E4C',  # tones/thanthakhat, low
+    '\uF70A': '\u0E48', '\uF70B': '\u0E49', '\uF70C': '\u0E4A', '\uF70D': '\u0E4B', '\uF70E': '\u0E4C',  # low + left-shifted
+    '\uF70F': '\u0E0D',  # \u0E0D descender-less
+    '\uF710': '\u0E31', '\uF711': '\u0E4D', '\uF712': '\u0E47',                                          # \u0E31 \u0E4D \u0E47 left-shifted
+    '\uF713': '\u0E48', '\uF714': '\u0E49', '\uF715': '\u0E4A', '\uF716': '\u0E4B', '\uF717': '\u0E4C',  # tones/thanthakhat, left-shifted
+    '\uF718': '\u0E38', '\uF719': '\u0E39', '\uF71A': '\u0E3A',                                          # lower vowels / phinthu, lowered
+}
+
 # --- Glyph Names for Vector Analysis ---
 # ใช้ตัวเล็กทั้งหมดเพื่อ Case Insensitive Matching
 NAME_NIKHAHIT = ['uni0e4d', 'nikhahit', 'bindu', 'afii59757']

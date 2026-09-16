@@ -12,11 +12,14 @@ from fontTools.ttLib import TTFont
 
 from trdg.vector_engine import FontVectorEngineHB
 from trdg.utils import get_text_bbox, get_text_height
-from trdg.thai_utils import contains_thai, THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_UPPER_VOWELS, has_upper_vowel, \
-    has_lower_vowel, split_grapheme_clusters
+from trdg.thai_utils import contains_thai, THAI_TONE_MARKS, THAI_UPPER_DIACRITICS, THAI_UPPER_VOWELS, THAI_PUA_MAP, \
+    has_upper_vowel, has_lower_vowel, split_grapheme_clusters
 
 _vector_engines = {}
 _font_cmap_cache = {}  # Cache for supported characters in each font
+_dumb_fonts = {}
+_fallback_font_list = None
+_FONT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 def _get_vector_engine(font_path: str, size: int) -> FontVectorEngineHB:
     """Get or create a cached vector engine."""
@@ -24,6 +27,12 @@ def _get_vector_engine(font_path: str, size: int) -> FontVectorEngineHB:
     if key not in _vector_engines:
         _vector_engines[key] = FontVectorEngineHB(font_path, size)
     return _vector_engines[key]
+
+def _get_dumb_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
+    key = (font_path, size)
+    if key not in _dumb_fonts:
+        _dumb_fonts[key] = ImageFont.truetype(font=font_path, size=size, layout_engine=ImageFont.Layout.BASIC)
+    return _dumb_fonts[key]
 
 def _get_font_cmap(font_path: str) -> set:
     """Get a set of all supported character codepoints for a given font."""
@@ -37,17 +46,25 @@ def _get_font_cmap(font_path: str) -> set:
             _font_cmap_cache[font_path] = set()
     return _font_cmap_cache[font_path]
 
-def _get_random_latin_font(latin_font_dir: str = "fonts/latin") -> str:
-    """Get random Latin font from directory."""
-    try:
-        if not os.path.exists(latin_font_dir):
-            return None
-        fonts = [f for f in os.listdir(latin_font_dir) if f.endswith(('.ttf', '.otf'))]
-        if not fonts:
-            return None
-        return os.path.join(latin_font_dir, rnd.choice(fonts))
-    except:
+def _fallback_candidates() -> List[str]:
+    """All bundled fonts, Thai first, then Latin (paths resolved from the package, not the CWD)."""
+    global _fallback_font_list
+    if _fallback_font_list is None:
+        found = []
+        for sub in ("th", "th_doc", "latin"):
+            d = os.path.join(_FONT_ROOT, sub)
+            if os.path.isdir(d):
+                found += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.lower().endswith((".ttf", ".otf"))]
+        _fallback_font_list = found
+    return _fallback_font_list
+
+def _get_fallback_font(segment: str, exclude: str) -> str:
+    """Random font that covers every non-space character of `segment`, or None."""
+    needed = {ord(c) for c in segment if not c.isspace()}
+    if not needed:
         return None
+    ok = [p for p in _fallback_candidates() if p != exclude and needed <= _get_font_cmap(p)]
+    return rnd.choice(ok) if ok else None
 
 def _split_text_by_font_support(text: str, primary_font_path: str) -> List[Tuple[str, bool]]:
     """
@@ -139,22 +156,20 @@ def _generate_horizontal_text(
             character_spacing, fit, word_split, stroke_width, stroke_fill
         )
 
-    # Mixed rendering with fallback
-    latin_fallback_font = _get_random_latin_font()
-    if not latin_fallback_font:
-        warnings.warn("Fallback needed but no Latin font found in fonts/latin. Tofu might occur.")
-        return _generate_horizontal_text_original(
-            text, font, text_color, font_size, space_width,
-            character_spacing, fit, word_split, stroke_width, stroke_fill
-        )
-
+    # Mixed rendering with per-segment fallback fonts
     segment_images = []
     segment_masks = []
     all_char_positions = []
     cumulative_width = 0
 
     for seg_text, is_supported in segments:
-        seg_font = font if is_supported else latin_fallback_font
+        if is_supported:
+            seg_font = font
+        else:
+            seg_font = _get_fallback_font(seg_text, font)
+            if seg_font is None:
+                # No bundled font can draw this: caller skips the sample instead of rendering tofu
+                return None, None, []
 
         seg_img, seg_mask, seg_positions = _generate_horizontal_text_original(
             seg_text, seg_font, text_color, font_size, space_width,
@@ -223,7 +238,7 @@ def _generate_horizontal_text_original(
         print(f"[Error] Could not load Vector Engine for {font}: {e}")
         return None, None, []
 
-    dumb_font = ImageFont.truetype(font=font, size=font_size, layout_engine=ImageFont.Layout.BASIC)
+    dumb_font = _get_dumb_font(font, font_size)
 
     buf = hb.Buffer()
     buf.add_str(text)
@@ -238,7 +253,8 @@ def _generate_horizontal_text_original(
         buf.script = 'latn'
         buf.language = 'en'
 
-    features = {"kern": True, "liga": True, "ccmp": True, "locl": True, "mark": True, "mkmk": True}
+    # liga off: "fi"/"fl" ligature glyphs have no single character and would vanish from the image
+    features = {"kern": True, "liga": False, "ccmp": True, "locl": True, "mark": True, "mkmk": True}
     hb.shape(engine.hb_font, buf, features)
 
     min_x, max_x = float('inf'), float('-inf')
@@ -252,6 +268,10 @@ def _generate_horizontal_text_original(
     for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
         original_glyph_name = engine.ttfont.getGlyphName(info.codepoint)
         char_str = engine.get_char_from_glyph_name(original_glyph_name)
+        # Legacy PUA positional variant: reason about the standard character, draw the variant glyph
+        pua_draw = char_str if char_str in THAI_PUA_MAP else None
+        if pua_draw:
+            char_str = THAI_PUA_MAP[pua_draw]
         temp_comps = engine.decompose_glyph(original_glyph_name)
         temp_roles = [c.get('role', 'UNKNOWN') for c in temp_comps]
 
@@ -320,6 +340,8 @@ def _generate_horizontal_text_original(
             if aa_glyph: items_to_process.append(('\u0E32', aa_glyph))
         elif len(char_str) > 1:
             for c in char_str: items_to_process.append((c, engine.get_glyph_name_from_char(c)))
+        elif pua_draw:
+            items_to_process.append((char_str, original_glyph_name))
         else:
             items_to_process.append((char_str, engine.get_glyph_name_from_char(char_str) if char_str else original_glyph_name))
 
@@ -358,7 +380,7 @@ def _generate_horizontal_text_original(
                 min_x, max_x = min(min_x, current_draw_x), max(max_x, current_draw_x + x_advance)
                 min_y, max_y = min(min_y, current_draw_y), max(max_y, current_draw_y + font_size * 0.7)
 
-            glyph_layout_data.append({"glyph_name": sub_glyph_name, "char_str": sub_char, "components": components, "draw_x": current_draw_x, "draw_y": item_draw_y, "x_advance": x_advance})
+            glyph_layout_data.append({"glyph_name": sub_glyph_name, "char_str": sub_char, "draw_str": pua_draw or sub_char, "components": components, "draw_x": current_draw_x, "draw_y": item_draw_y, "x_advance": x_advance})
 
         cursor_x += x_advance
         cursor_y += y_advance
@@ -379,7 +401,7 @@ def _generate_horizontal_text_original(
 
     for g_data in glyph_layout_data:
         base_draw_x, base_draw_y = g_data['draw_x'] + start_offset_x, g_data['draw_y']
-        glyph_char = g_data['char_str']
+        glyph_char = g_data['draw_str']
         if glyph_char:
             txt_img_draw.text((base_draw_x, font_top_y - base_draw_y), glyph_char, fill=fill, font=dumb_font, anchor="ls", stroke_width=stroke_width, stroke_fill=stroke_fill_color)
 
