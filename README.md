@@ -116,7 +116,10 @@ bounding boxes or COCO output are requested.
 
 * Shaping is done by HarfBuzz; each glyph is then drawn at the shaped position, so
   stacked vowel + tone mark, left-shifted marks after ป ฝ ฟ and lowered marks are placed
-  like the font intends.
+  like the font intends. Every glyph is rasterized by glyph id (the font's cmap is remapped to
+  U+F0000+gid for Pillow), so mark variants such as `uni0E4C.small` are drawn exactly as shaped
+  and the image always matches the label; a line the font cannot draw (missing or blank
+  glyph, dotted circle for an orphan mark) is skipped.
 * Legacy fonts without GPOS (TH Sarabun, TH SarabunNew, the UPC family, Angsana/Cordia
   style fonts) select positional variants from the Private Use Area (U+F700–U+F71A).
   These are mapped back to the standard character for bookkeeping while the variant
