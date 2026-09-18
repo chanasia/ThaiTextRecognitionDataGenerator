@@ -10,21 +10,15 @@ augmentation that reproduces the failure modes of real scans and forms.
 
 | | |
 |---|---|
-| ![](samples/กรุงเทพมหานครเป็นเมืองหลวงของประเทศไทย_8.jpg) | ![](samples/ช่วย%20Check%20บิลโต๊ะห้าให้หน่อยครับลูกค้าจะกลับแล้ว_18.jpg) |
+| ![](samples/line_09.jpg) | ![](samples/line_19.jpg) |
 
 ## Setup
 
-Python 3.10+. `uharfbuzz` / `opencv-python` ship x86-64 wheels only, so on **Windows on ARM**
-create the venv from an x86-64 interpreter (runs under the built-in emulation):
+Python 3.10+. Pure pip install, no OpenCV; wheels exist for Windows (x86-64 and ARM64), Linux and macOS.
 
 ```bash
-# any x86-64 machine (Windows / Linux / macOS-Intel, Docker)
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# Windows on ARM
-uv venv --python cpython-3.12-windows-x86_64-none .venv
-uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
 
 Docker: `docker build -t trdg . && docker run --rm -v $PWD/out:/app/out trdg trdg/run.py --help`
@@ -120,12 +114,13 @@ bounding boxes or COCO output are requested.
   U+F0000+gid for Pillow), so mark variants such as `uni0E4C.small` are drawn exactly as shaped
   and the image always matches the label; a line the font cannot draw (missing or blank
   glyph, dotted circle for an orphan mark) is skipped.
-* Legacy fonts without GPOS (TH Sarabun, TH SarabunNew, the UPC family, Angsana/Cordia
-  style fonts) select positional variants from the Private Use Area (U+F700–U+F71A).
-  These are mapped back to the standard character for bookkeeping while the variant
-  glyph is drawn, otherwise `ฝั่ง` came out as `ฝ่ฝ` and `ป์` lost its mark:
+* Legacy fonts without GPOS (TH Sarabun PSK, the UPC family, Angsana/Cordia style fonts) get
+  HarfBuzz's Thai fallback, which selects positional variants from the Private Use Area
+  (U+F700–U+F71A). They are drawn by glyph id like every other glyph and mapped back to the
+  standard character only for the character-box bookkeeping. Stacked marks, legacy and
+  modern fonts alike (TH SarabunNew, UPC, Dillenia, Kanit, IBM Plex, Sarabun):
 
-  ![](samples/legacy_pua_before_after.png)
+  ![](samples/stacked_marks_fonts.png)
 * Text a font cannot cover is rendered with another bundled font that can, per segment;
   if none can, the sample is skipped.
 
