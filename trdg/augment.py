@@ -17,9 +17,8 @@ import io
 import random as rnd
 from typing import Dict, Optional
 
-import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 # probability of each op, per preset
 PRESETS: Dict[str, Dict[str, float]] = {
@@ -99,6 +98,14 @@ def _ink_fraction(arr: np.ndarray) -> float:
     return float((np.abs(g - np.median(g)) > 40).mean())
 
 
+def _minmax(arr: np.ndarray, k, use_max: bool) -> np.ndarray:
+    """Rectangular max / min filter (cv2 dilate / erode with a ones kernel, anchor at the centre)."""
+    kh, kw = k
+    pad = ((kh // 2, kh - 1 - kh // 2), (kw // 2, kw - 1 - kw // 2), (0, 0))
+    win = np.lib.stride_tricks.sliding_window_view(np.pad(arr, pad, mode="edge"), (kh, kw), axis=(0, 1))
+    return win.max(axis=(-2, -1)) if use_max else win.min(axis=(-2, -1))
+
+
 def morph(arr: np.ndarray, r) -> np.ndarray:
     """Thicken (ink spread) or thin (light print) strokes. Thinning is what eats tone marks."""
     dark_on_light = arr.mean() > 127
@@ -107,32 +114,34 @@ def morph(arr: np.ndarray, r) -> np.ndarray:
         k = r.choice([(2, 2), (2, 1), (1, 2), (2, 2)])   # 3x3 wipes out light-weight fonts
     else:
         k = r.choice([(2, 2), (2, 1), (1, 2), (3, 3), (2, 3), (3, 2)])
-    kernel = np.ones(k, np.uint8)
-    # erode shrinks bright regions -> thickens dark text; dilate does the opposite
-    out = cv2.dilate(arr, kernel, iterations=1) if dark_on_light == thin else cv2.erode(arr, kernel, iterations=1)
+    # a max filter grows bright regions -> thins dark text; a min filter does the opposite
+    out = _minmax(arr, k, use_max=(dark_on_light == thin))
     if thin and _ink_fraction(out) < 0.5 * _ink_fraction(arr):
         return arr  # strokes fell apart (thin font): keep the original
     return out
+
+
+def _resize(arr: np.ndarray, size, resample) -> np.ndarray:
+    return np.array(Image.fromarray(arr).resize(size, resample))
 
 
 def lowres(arr: np.ndarray, r) -> np.ndarray:
     """Downscale then upscale: screenshots, 100-dpi scans, chat images."""
     h, w = arr.shape[:2]
     f = r.uniform(0.35, 0.75)
-    small = cv2.resize(arr, (max(2, int(w * f)), max(2, int(h * f))), interpolation=cv2.INTER_AREA)
-    up = r.choice([cv2.INTER_LINEAR, cv2.INTER_CUBIC, cv2.INTER_NEAREST, cv2.INTER_LINEAR])
-    return cv2.resize(small, (w, h), interpolation=up)
+    small = _resize(arr, (max(2, int(w * f)), max(2, int(h * f))), Image.Resampling.BOX)
+    up = r.choice([Image.Resampling.BILINEAR, Image.Resampling.BICUBIC, Image.Resampling.NEAREST, Image.Resampling.BILINEAR])
+    return _resize(small, (w, h), up)
 
 
 def motion(arr: np.ndarray, r) -> np.ndarray:
+    """Box blur along one axis: small camera or scanner motion."""
     k = r.randint(3, 7)
-    kernel = np.zeros((k, k), np.float32)
-    if r.random() < 0.5:
-        kernel[k // 2, :] = 1.0
-    else:
-        kernel[:, k // 2] = 1.0
-    kernel /= k
-    return cv2.filter2D(arr, -1, kernel)
+    axis = 1 if r.random() < 0.5 else 0
+    pad = [(0, 0), (0, 0), (0, 0)]
+    pad[axis] = (k // 2, k - 1 - k // 2)
+    win = np.lib.stride_tricks.sliding_window_view(np.pad(arr.astype(np.float32), pad, mode="reflect"), k, axis=axis)
+    return np.clip(np.rint(win.mean(axis=-1)), 0, 255).astype(np.uint8)
 
 
 def noise(arr: np.ndarray, r) -> np.ndarray:
@@ -170,14 +179,29 @@ def jpeg(arr: np.ndarray, r) -> np.ndarray:
     return np.array(Image.open(buf).convert("RGB"))
 
 
+def _otsu(gray: np.ndarray) -> int:
+    """Threshold maximising between-class variance; pixels above it are paper."""
+    hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+    w0 = np.cumsum(hist)
+    w1 = w0[-1] - w0
+    m0 = np.cumsum(hist * np.arange(256))
+    m1 = m0[-1] - m0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var = w0 * w1 * (m0 / w0 - m1 / w1) ** 2
+    return int(np.nanargmax(var))
+
+
 def threshold(arr: np.ndarray, r) -> np.ndarray:
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    gray = np.array(Image.fromarray(arr).convert("L"))
     if r.random() < 0.5:
-        _, b = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        b = gray > _otsu(gray)
     else:
         block = r.choice([11, 15, 21, 31])
-        b = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, r.randint(2, 10))
-    return cv2.cvtColor(b, cv2.COLOR_GRAY2RGB)
+        c = r.randint(2, 10)
+        sigma = 0.3 * ((block - 1) * 0.5 - 1) + 0.8          # the sigma cv2 derives from a kernel of this size
+        local = np.array(Image.fromarray(gray).filter(ImageFilter.GaussianBlur(sigma)), dtype=np.int16)
+        b = gray > local - c
+    return np.repeat((b * 255).astype(np.uint8)[:, :, None], 3, axis=2)
 
 
 def invert(arr: np.ndarray, r) -> np.ndarray:
@@ -190,16 +214,18 @@ def shear(arr: np.ndarray, r) -> np.ndarray:
     h, w = arr.shape[:2]
     s = r.uniform(-0.25, 0.25)
     pad = int(abs(s) * h) + 1
-    m = np.float32([[1, s, pad if s < 0 else 0], [0, 1, 0]])
-    return cv2.warpAffine(arr, m, (w + pad, h), flags=cv2.INTER_LINEAR,
-                          borderMode=cv2.BORDER_CONSTANT, borderValue=_bg_color(arr))
+    tx = pad if s < 0 else 0
+    # Image.transform takes the inverse map: source pixel = (x - s*y - tx, y)
+    out = Image.fromarray(arr).transform((w + pad, h), Image.Transform.AFFINE, (1, -s, -tx, 0, 1, 0),
+                                         resample=Image.Resampling.BILINEAR, fillcolor=_bg_color(arr))
+    return np.array(out)
 
 
 def aspect(arr: np.ndarray, r) -> np.ndarray:
     """Stretch / squash width: condensed print, fax, resized screenshots."""
     h, w = arr.shape[:2]
     f = r.uniform(0.7, 1.35)
-    return cv2.resize(arr, (max(8, int(w * f)), h), interpolation=cv2.INTER_LINEAR if f > 1 else cv2.INTER_AREA)
+    return _resize(arr, (max(8, int(w * f)), h), Image.Resampling.BILINEAR if f > 1 else Image.Resampling.BOX)
 
 
 ORDER = [

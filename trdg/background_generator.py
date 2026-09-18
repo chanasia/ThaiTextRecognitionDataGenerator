@@ -1,4 +1,3 @@
-import cv2
 import math
 import os
 import random as rnd
@@ -12,13 +11,8 @@ def gaussian_noise(height: int, width: int) -> Image:
     Create a background with Gaussian noise (to mimic paper)
     """
 
-    # We create an all white image
-    image = np.ones((height, width)) * 255
-
-    # We add gaussian noise
-    cv2.randn(image, 235, 10)
-
-    return Image.fromarray(image).convert("RGBA")
+    noise = np.random.default_rng(rnd.getrandbits(32)).normal(235, 10, (height, width))
+    return Image.fromarray(np.clip(noise, 0, 255).astype(np.uint8)).convert("RGBA")
 
 
 def plain_white(height: int, width: int) -> Image:
